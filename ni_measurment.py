@@ -56,17 +56,29 @@ READ_PERIOD = 0.05
 UI_UPDATE_PERIOD = 100  # ms — reduced from 50 to cut UI redraw overhead
 
 
+def _log_module(message, level="DEBUG"):
+    """Module-level logging helper (no self available)."""
+    timestamp = time.strftime("%H:%M:%S")
+    print(f"[{timestamp}] [{level}] [MODULE] {message}", flush=True)
+
+
 def discover_devices():
+    _log_module(f"discover_devices() called")
     if not _HAS_NIDAQMX:
+        _log_module("discover_devices: nidaqmx not available, returning []")
         return []
     try:
         system = System.local()
-        return [d.name for d in system.devices]
-    except Exception:
+        devs = [d.name for d in system.devices]
+        _log_module(f"discover_devices: found {len(devs)} device(s): {devs}")
+        return devs
+    except Exception as e:
+        _log_module(f"discover_devices: exception: {e}")
         return []
 
 
 def get_device_capabilities(device_name):
+    _log_module(f"get_device_capabilities({device_name}) called")
     caps = {
         "ai_channels": [],
         "ao_channels": [],
@@ -76,6 +88,7 @@ def get_device_capabilities(device_name):
         "ao_ranges": [(AO_MIN, AO_MAX)],
     }
     if not _HAS_NIDAQMX:
+        _log_module("get_device_capabilities: nidaqmx not available, returning defaults")
         return caps
     try:
         system = System.local()
@@ -116,13 +129,16 @@ def get_device_capabilities(device_name):
 
 
 def _extract_names(obj):
+    _log_module(f"_extract_names({type(obj).__name__}) called")
     names = []
     try:
         for item in obj:
             name = getattr(item, "name", None) or str(item)
             names.append(name)
     except TypeError:
+        _log_module(f"_extract_names: TypeError caught, falling back to list(obj)")
         names = list(obj)
+    _log_module(f"_extract_names: returning {names}")
     return names
 
 
@@ -157,13 +173,16 @@ class ScrollableFrame(ttk.Frame):
 
 class USB6363App:
     def __init__(self, root=None, cli_mode=False):
+        _log_module(f"USB6363App.__init__ called (cli_mode={cli_mode})")
         self.cli_mode = cli_mode
         self.root = root
         self.device_var = tk.StringVar(value=DEFAULT_DEVICE) if not cli_mode else None
+        _log_module(f"USB6363App.__init__: calling discover_devices()")
         self.available_devices = discover_devices()
         self.selected_device = tk.StringVar(
             value=self.available_devices[0] if self.available_devices else ""
         ) if not cli_mode else None
+        _log_module(f"USB6363App.__init__: available_devices={self.available_devices}, selected={self.selected_device.get() if self.selected_device else None}")
         self.device_capabilities = {}
         self.ai_channels = []
         self.ao_channels = []
@@ -200,7 +219,9 @@ class USB6363App:
             self.root.title("NI USB-6363 Monitor & Output Controller")
             self.root.geometry("1300x850")
             self.root.minsize(950, 650)
+            _log_module(f"USB6363App.__init__: calling _build_ui()")
             self._build_ui()
+            _log_module(f"USB6363App.__init__: calling _schedule_plot_update()")
             self._schedule_plot_update()
             if self.selected_device.get():
                 self.root.after(100, self._on_device_selected)
@@ -210,6 +231,7 @@ class USB6363App:
         self._log(f"CLI mode: {cli_mode}", "INFO")
         self._log(f"nidaqmx available: {_HAS_NIDAQMX}", "INFO")
         self._log(f"Devices discovered: {self.available_devices}", "INFO")
+        _log_module(f"USB6363App.__init__ complete")
 
     def _log(self, message, level="INFO"):
         timestamp = time.strftime("%H:%M:%S")
@@ -619,15 +641,19 @@ class USB6363App:
         self.canvas.draw_idle()
 
     def _start_daq(self):
+        _log_module(f"USB6363App._start_daq called (running={self.running})")
         if self.running:
+            _log_module(f"USB6363App._start_daq: already running, returning")
             return
         if not _HAS_NIDAQMX:
+            _log_module(f"USB6363App._start_daq: nidaqmx not available")
             self._show_error(
                 "Missing dependency",
                 "nidaqmx is not installed. Install with:\n"
                 "pip install nidaqmx matplotlib numpy")
             return
         if not self.selected_device.get():
+            _log_module(f"USB6363App._start_daq: no device selected")
             self._show_error("No Device", "Please select an NI DAQ device.")
             return
         self.running = True
@@ -638,27 +664,34 @@ class USB6363App:
         self._last_ai_len = 0
         self._last_di_len = 0
         dev = self.selected_device.get()
+        _log_module(f"USB6363App._start_daq: starting DAQ thread for device {dev}")
         self.daq_thread = threading.Thread(
             target=self._daq_loop, args=(dev,), daemon=True)
         self.daq_thread.start()
         self._set_status("DAQ: running", "green")
+        _log_module(f"USB6363App._start_daq: DAQ thread started")
 
     def _daq_loop(self, dev):
+        _log_module(f"USB6363App._daq_loop starting on {dev}")
         self._log(f"DAQ loop starting on {dev}", "INFO")
         try:
+            _log_module(f"USB6363App._daq_loop: ai_channels={self.ai_channels}, di_lines={self.di_lines}")
             ai_task = nidaqmx.Task() if self.ai_channels else None
             di_task = nidaqmx.Task() if self.di_lines else None
             if ai_task is not None:
+                _log_module(f"USB6363App._daq_loop: configuring AI task with {len(self.ai_channels)} channels")
                 for chan in self.ai_channels:
                     ai_min, ai_max = self.device_capabilities.get(
                         "ai_ranges", [(AI_MIN, AI_MAX)])[0]
                     ai_task.ai_channels.add_ai_voltage_chan(
                         chan, min_val=ai_min, max_val=ai_max)
             if di_task is not None:
+                _log_module(f"USB6363App._daq_loop: configuring DI task with {len(self.di_lines)} channels")
                 self._log(f"Adding {len(self.di_lines)} DI channels", "DEBUG")
                 for line in self.di_lines:
                     di_task.di_channels.add_di_chan(line)
             self._log("DAQ tasks created, entering read loop", "INFO")
+            _log_module(f"USB6363App._daq_loop: DAQ tasks created, entering read loop")
             read_count = 0
             while not self.stop_event.is_set():
                 t = time.perf_counter() - self.t0
@@ -685,6 +718,7 @@ class USB6363App:
                             self.di_buffer.append((t, di.copy()))
                     if read_count % 100 == 0:
                         self._log(f"DAQ read count: {read_count}", "DEBUG")
+                        _log_module(f"USB6363App._daq_loop: read count={read_count}, ai={ai}, di={di}")
                 self.stop_event.wait(READ_PERIOD)
             if ai_task is not None:
                 ai_task.close()
@@ -693,18 +727,21 @@ class USB6363App:
         except DaqError as e:
             self._log(f"DAQ error: {e}", "ERROR")
             self._set_status(f"DAQ error: {e}", "red")
+            _log_module(f"USB6363App._daq_loop: DaqError: {e}")
             if not self.cli_mode:
                 self.root.after(0, lambda err=e: self._show_error(
                     "NI-DAQmx Error", str(err)))
         except Exception as e:
             self._log(f"DAQ error: {e}", "ERROR")
             self._set_status(f"DAQ error: {e}", "red")
+            _log_module(f"USB6363App._daq_loop: Exception: {e}")
             if not self.cli_mode:
                 self.root.after(0, lambda err=e: self._show_error("Error", str(err)))
         finally:
             self.running = False
             self._log("DAQ loop stopped", "INFO")
             self._set_status("DAQ: stopped", "gray")
+            _log_module(f"USB6363App._daq_loop: DAQ loop stopped, running=False")
 
     def _set_status(self, text, color):
         if self.cli_mode:
@@ -714,14 +751,17 @@ class USB6363App:
             self.status_label.configure(foreground=color)
 
     def _open_output_tasks(self):
+        _log_module(f"USB6363App._open_output_tasks called (ao_task={self.ao_task}, do_task={self.ao_task})")
         dev = self.selected_device.get().strip()
         if not dev:
+            _log_module(f"USB6363App._open_output_tasks: no device selected")
             return
         ao_ranges = self.device_capabilities.get(
             "ao_ranges", [(AO_MIN, AO_MAX)])[0]
         ao_min, ao_max = ao_ranges
         if self.ao_task is None and self.ao_channels:
             self._log(f"Opening AO task with {len(self.ao_channels)} channels", "INFO")
+            _log_module(f"USB6363App._open_output_tasks: creating AO task with channels {self.ao_channels}")
             self.ao_task = nidaqmx.Task()
             for chan in self.ao_channels:
                 self.ao_task.ao_channels.add_ao_voltage_chan(
@@ -729,12 +769,14 @@ class USB6363App:
             self.ao_task.write([0.0] * len(self.ao_channels))
         if self.do_task is None and self.do_lines:
             self._log(f"Opening DO task with {len(self.do_lines)} lines", "INFO")
+            _log_module(f"USB6363App._open_output_tasks: creating DO task with lines {self.do_lines}")
             self.do_task = nidaqmx.Task()
             for line in self.do_lines:
                 self.do_task.do_channels.add_do_chan(line)
             self.do_task.write([False] * len(self.do_lines))
 
     def _close_output_tasks(self):
+        _log_module(f"USB6363App._close_output_tasks called (ao_task={self.ao_task}, do_task={self.do_task})")
         self._log("Closing output tasks", "INFO")
         for task in (self.ao_task, self.do_task):
             if task is not None:
@@ -840,10 +882,12 @@ class USB6363App:
 
     def _test_pin_connections(self, phase1_only=False, max_lines=None):
         """Analyze digital I/O pin connections and detect logic networks."""
+        _log_module(f"USB6363App._test_pin_connections called (phase1_only={phase1_only}, max_lines={max_lines})")
         self._na_finalized = False
         self._na_results_window = None
         self._na_csv_saved = False
         if not _HAS_NIDAQMX:
+            _log_module(f"USB6363App._test_pin_connections: nidaqmx not available")
             if self.cli_mode:
                 print("ERROR: nidaqmx is not installed")
             else:
@@ -945,6 +989,7 @@ class USB6363App:
     def _run_na_analysis(self, dev, dio_all, pulse_s, pulse_ms, was_running,
                          phase1_only=False):
         """Run the Network Analyzer in a background thread."""
+        _log_module(f"USB6363App._run_na_analysis called (dev={dev}, dio_all={dio_all}, pulse_ms={pulse_ms}, phase1_only={phase1_only})")
         total_tests = len(dio_all) + len(dio_all) * (len(dio_all) - 1) // 2 * 4
         test_count = 0
         eta_times = []
@@ -1060,9 +1105,11 @@ class USB6363App:
                     if j < len(high_read) and j < len(baseline):
                         if high_read[j] and not baseline[j]:
                             affects_single[output_line].add(input_line)
+                            _log_module(f"USB6363App._run_na_analysis Phase 1: {output_line} affects {input_line}")
 
                 test_time = time.perf_counter() - test_start
                 eta_times.append(test_time)
+                _log_module(f"USB6363App._run_na_analysis Phase 1 test {test_count}/{total_tests}: output={output_line}, time={test_time:.3f}s, responders={affects_single[output_line]}")
 
             if self._na_cancel:
                 self._log("Analysis cancelled by user during Phase 1", "WARN")
@@ -1184,6 +1231,7 @@ class USB6363App:
                 test_start = time.perf_counter()
 
                 output_lines = [l for l in dio_all if l != in_a and l != in_b]
+                _log_module(f"USB6363App._run_na_analysis Phase 2 test {test_count}/{total_tests}: {a_short}+{b_short} -> testing {len(output_lines)} outputs")
 
                 with nidaqmx.Task() as do_task_2, nidaqmx.Task() as di_task_2:
                     do_task_2.do_channels.add_do_chan(in_a)
@@ -1236,6 +1284,7 @@ class USB6363App:
 
                 test_time = time.perf_counter() - test_start
                 eta_times.append(test_time)
+                _log_module(f"USB6363App._run_na_analysis Phase 2 pair {a_short}+{b_short}: gates_found={len(logic_gates)}, time={test_time:.3f}s")
 
                 if self._na_cancel:
                     self._log("Analysis cancelled by user after Phase 2", "WARN")
@@ -1287,6 +1336,7 @@ class USB6363App:
                     "networks": combinational_networks,
                     "dio_all": dio_all,
                 }
+                _log_module(f"USB6363App._run_na_analysis complete: pairs={len(connected_pairs)}, gates={len(logic_gates)}, networks={len(combinational_networks)}, dio_all={len(dio_all)}")
 
                 if not self.cli_mode:
                     self.root.after(0, lambda: self._finalize_na_gui(
@@ -1459,6 +1509,7 @@ class USB6363App:
             self.root.after(200, self._start_daq)
 
     def _open_na_results_window(self):
+        _log_module(f"USB6363App._open_na_results_window called")
         r = self.na_results
 
         # Close any existing results window to prevent duplicates
@@ -1581,6 +1632,7 @@ class USB6363App:
             ])
 
         text_widget.configure(state="disabled")
+        _log_module(f"USB6363App._open_na_results_window: results window opened")
 
         btn_frame = ttk.Frame(win)
         btn_frame.pack(fill="x", padx=10, pady=10)
@@ -1669,6 +1721,7 @@ class USB6363App:
 
 def run_cli(args, app):
     """Command-line interface mode for testing and automation."""
+    _log_module(f"run_cli called with args={vars(args)}")
     import nidaqmx
     from nidaqmx.errors import DaqError
 
@@ -1697,6 +1750,7 @@ def run_cli(args, app):
     print(f"  DI lines (port 0): {len(di_lines)}")
     print(f"  DO lines (ports 1+): {len(do_lines)}")
     print()
+    _log_module(f"run_cli: device={dev}, ai={len(ai_chans)}, ao={len(ao_chans)}, di={len(di_lines)}, do={len(do_lines)}")
 
     # --- List devices ---
     if args.list_devices:
@@ -1875,6 +1929,7 @@ def run_cli(args, app):
         app.selected_device = type('SV', (), {'get': lambda self: dev})()
         app._na_phase1_only = args.phase_1_only
         app._na_max_lines = args.max_lines
+        _log_module(f"run_cli: starting Network Analyzer on {dev} (phase1_only={args.phase_1_only}, max_lines={args.max_lines})")
         app._test_pin_connections(phase1_only=args.phase_1_only,
                                   max_lines=args.max_lines)
         return 0
@@ -1885,6 +1940,7 @@ def run_cli(args, app):
 
 
 def main():
+    _log_module("main() called")
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -1947,9 +2003,11 @@ def main():
 
     if args.cli or args.list_devices or args.read_ai or args.read_di or \
        args.write_ao or args.write_do or args.monitor or args.analyze:
+        _log_module(f"main: starting CLI mode with args={vars(args)}")
         app = USB6363App(root=None, cli_mode=True)
         return run_cli(args, app)
 
+    _log_module("main: starting GUI mode")
     root = tk.Tk()
     app = USB6363App(root)
     root.mainloop()
