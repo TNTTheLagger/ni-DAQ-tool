@@ -1290,61 +1290,61 @@ class USB6363App:
                     self._log("Analysis cancelled by user after Phase 2", "WARN")
                     return
 
-                if self.cli_mode:
-                    print("Phase 2 (logic gate detection) complete.")
-                    print(f"Found {len(logic_gates)} logic gate(s)")
-                    for gate in logic_gates:
-                        a = gate["input_a"].split("/")[-1] if "/" in gate["input_a"] else gate["input_a"]
-                        b = gate["input_b"].split("/")[-1] if "/" in gate["input_b"] else gate["input_b"]
-                        c = gate["output"].split("/")[-1] if "/" in gate["output"] else gate["output"]
-                        t = gate["truth"]
-                        print(f"  {a} {gate['gate_symbol']} {b} -> {c} [{gate['gate_name']}] "
-                              f"truth={t}")
-                    print()
+            if self.cli_mode:
+                print("Phase 2 (logic gate detection) complete.")
+                print(f"Found {len(logic_gates)} logic gate(s)")
+                for gate in logic_gates:
+                    a = gate["input_a"].split("/")[-1] if "/" in gate["input_a"] else gate["input_a"]
+                    b = gate["input_b"].split("/")[-1] if "/" in gate["input_b"] else gate["input_b"]
+                    c = gate["output"].split("/")[-1] if "/" in gate["output"] else gate["output"]
+                    t = gate["truth"]
+                    print(f"  {a} {gate['gate_symbol']} {b} -> {c} [{gate['gate_name']}] "
+                          f"truth={t}")
+                print()
 
-                # Phase 3: Combinational network detection
-                combinational_networks = []
-                gate_outputs = {g["output"] for g in logic_gates}
+            # Phase 3: Combinational network detection
+            combinational_networks = []
+            gate_outputs = {g["output"] for g in logic_gates}
 
-                for gate_out in gate_outputs:
-                    for other_gate in logic_gates:
-                        if other_gate["output"] == gate_out:
-                            continue
-                        if gate_out in (other_gate["input_a"], other_gate["input_b"]):
-                            combinational_networks.append({
-                                "upstream_gate": gate_out,
-                                "downstream_gate": other_gate["output"],
-                                "upstream_name": next(
-                                    g["gate_name"] for g in logic_gates
-                                    if g["output"] == gate_out),
-                                "downstream_name": other_gate["gate_name"],
-                            })
+            for gate_out in gate_outputs:
+                for other_gate in logic_gates:
+                    if other_gate["output"] == gate_out:
+                        continue
+                    if gate_out in (other_gate["input_a"], other_gate["input_b"]):
+                        combinational_networks.append({
+                            "upstream_gate": gate_out,
+                            "downstream_gate": other_gate["output"],
+                            "upstream_name": next(
+                                g["gate_name"] for g in logic_gates
+                                if g["output"] == gate_out),
+                            "downstream_name": other_gate["gate_name"],
+                        })
 
-                if self.cli_mode:
-                    if combinational_networks:
-                        print("Combinational networks (gate chains):")
-                        for net in combinational_networks:
-                            print(f"  {net['upstream_name']} ({net['upstream_gate']}) "
-                                  f"-> {net['downstream_name']} ({net['downstream_gate']})")
-                    print()
+            if self.cli_mode:
+                if combinational_networks:
+                    print("Combinational networks (gate chains):")
+                    for net in combinational_networks:
+                        print(f"  {net['upstream_name']} ({net['upstream_gate']}) "
+                              f"-> {net['downstream_name']} ({net['downstream_gate']})")
+                print()
 
-                self.na_results = {
-                    "device": dev,
-                    "pulse_ms": pulse_ms,
-                    "pairs": connected_pairs,
-                    "gates": logic_gates,
-                    "networks": combinational_networks,
-                    "dio_all": dio_all,
-                }
-                _log_module(f"USB6363App._run_na_analysis complete: pairs={len(connected_pairs)}, gates={len(logic_gates)}, networks={len(combinational_networks)}, dio_all={len(dio_all)}")
+            self.na_results = {
+                "device": dev,
+                "pulse_ms": pulse_ms,
+                "pairs": connected_pairs,
+                "gates": logic_gates,
+                "networks": combinational_networks,
+                "dio_all": dio_all,
+            }
+            _log_module(f"USB6363App._run_na_analysis complete: pairs={len(connected_pairs)}, gates={len(logic_gates)}, networks={len(combinational_networks)}, dio_all={len(dio_all)}")
 
-                if not self.cli_mode:
-                    self.root.after(0, lambda: self._finalize_na_gui(
-                        progress_win, dev, pulse_ms))
-                else:
-                    self._print_cli_na_results()
-                    self._save_cli_na_csv()
-                    self._set_status("DAQ: running", "green")
+            if not self.cli_mode:
+                self.root.after(0, lambda: self._finalize_na_gui(
+                    progress_win, dev, pulse_ms))
+            else:
+                self._print_cli_na_results()
+                self._save_cli_na_csv()
+                self._set_status("DAQ: running", "green")
 
         except Exception as e:
             self._log(f"Analyzer error: {e}", "ERROR")
