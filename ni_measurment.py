@@ -192,6 +192,7 @@ class USB6363App:
         self._na_phase1_only = False
         self._na_max_lines = None
         self._na_results_window = None
+        self._na_finalized = False
         self._last_ai_len = 0
         self._last_di_len = 0
 
@@ -839,6 +840,8 @@ class USB6363App:
 
     def _test_pin_connections(self, phase1_only=False, max_lines=None):
         """Analyze digital I/O pin connections and detect logic networks."""
+        self._na_finalized = False
+        self._na_results_window = None
         if not _HAS_NIDAQMX:
             if self.cli_mode:
                 print("ERROR: nidaqmx is not installed")
@@ -1099,7 +1102,27 @@ class USB6363App:
                 if self.cli_mode:
                     print("Phase 1 only mode — skipping Phase 2 logic gate detection.")
                 connected_pairs_for_phase2 = []
+                # Set results and finalize (no Phase 2)
+                self.na_results = {
+                    "device": dev,
+                    "pulse_ms": pulse_ms,
+                    "pairs": connected_pairs,
+                    "gates": [],
+                    "networks": [],
+                    "dio_all": dio_all,
+                }
+                if not self.cli_mode:
+                    self.root.after(0, lambda: self._finalize_na_gui(
+                        progress_win, dev, pulse_ms))
+                else:
+                    self._print_cli_na_results()
+                    self._save_cli_na_csv()
+                    self._set_status("DAQ: running", "green")
+                return
             else:
+                connected_pairs_for_phase2 = [(pin_a, pin_b)
+                                              for i, pin_a in enumerate(dio_all)
+                                              for pin_b in dio_all[i + 1:]]
                 connected_pairs_for_phase2 = [(pin_a, pin_b)
                                               for i, pin_a in enumerate(dio_all)
                                               for pin_b in dio_all[i + 1:]]
@@ -1289,6 +1312,11 @@ class USB6363App:
                 self._log("DAQ acquisition resumed", "INFO")
 
     def _finalize_na_gui(self, progress_win, dev, pulse_ms):
+        # Guard: prevent re-entry (window already opened for this analysis)
+        if self._na_finalized:
+            return
+        self._na_finalized = True
+
         try:
             if progress_win and progress_win.winfo_exists():
                 progress_win.destroy()
