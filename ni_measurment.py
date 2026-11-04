@@ -1092,54 +1092,17 @@ class USB6363App:
                     if b_responds_to_a and a_responds_to_b:
                         connected_pairs.append((pin_a, pin_b))
 
-            # Skip Phase 2 if Phase 1 only mode or no bridges found
-            # (no bidirectional connectivity = no logic gates possible)
+            # Phase 2: Full truth table on ALL pin pairs (not just bridged pairs).
+            # Combinational logic gates can exist without bidirectional bridges
+            # (e.g., A and B both drive C through an AND gate).
             if phase1_only:
                 if self.cli_mode:
                     print("Phase 1 only mode — skipping Phase 2 logic gate detection.")
                 connected_pairs_for_phase2 = []
-                # Set results early since Phase 2 is skipped
-                self.na_results = {
-                    "device": dev,
-                    "pulse_ms": pulse_ms,
-                    "pairs": connected_pairs,
-                    "gates": [],
-                    "networks": [],
-                    "dio_all": dio_all,
-                }
-                if not self.cli_mode:
-                    self.root.after(0, lambda: self._finalize_na_gui(
-                        progress_win, dev, pulse_ms))
-                else:
-                    self._print_cli_na_results()
-                    self._save_cli_na_csv()
-                    self._set_status("DAQ: running", "green")
-                return
-            elif not connected_pairs:
-                if self.cli_mode:
-                    print("No bidirectional bridges found in Phase 1 — "
-                          "skipping Phase 2 logic gate detection "
-                          "(no connectivity = no logic gates possible).")
-                connected_pairs_for_phase2 = []
-                # Set results early since Phase 2 is skipped
-                self.na_results = {
-                    "device": dev,
-                    "pulse_ms": pulse_ms,
-                    "pairs": connected_pairs,
-                    "gates": [],
-                    "networks": [],
-                    "dio_all": dio_all,
-                }
-                if not self.cli_mode:
-                    self.root.after(0, lambda: self._finalize_na_gui(
-                        progress_win, dev, pulse_ms))
-                else:
-                    self._print_cli_na_results()
-                    self._save_cli_na_csv()
-                    self._set_status("DAQ: running", "green")
-                return
             else:
-                connected_pairs_for_phase2 = connected_pairs
+                connected_pairs_for_phase2 = [(pin_a, pin_b)
+                                              for i, pin_a in enumerate(dio_all)
+                                              for pin_b in dio_all[i + 1:]]
 
             # Recalculate total_tests based on actual Phase 2 workload
             phase2_tests = len(connected_pairs_for_phase2) * 4
@@ -1507,68 +1470,82 @@ class USB6363App:
         text_widget.configure(yscrollcommand=v_scroll.set,
                               xscrollcommand=h_scroll.set)
 
-        lines = []
-        lines.append("=== Network Analyzer Results ===")
-        lines.append(f"Device: {r['device']}")
-        lines.append(f"Pulse width: {r['pulse_ms']} ms")
-        lines.append("")
+        # Build text in chunks and insert incrementally to avoid UI freeze
+        # with large result sets (many gates/networks).
+        text_widget.configure(state="normal")
 
+        def _insert_chunk(chunk_lines):
+            if chunk_lines:
+                text_widget.insert("end", "\n".join(chunk_lines) + "\n")
+            text_widget.update_idletasks()
+
+        # Header
+        _insert_chunk([
+            "=== Network Analyzer Results ===",
+            f"Device: {r['device']}",
+            f"Pulse width: {r['pulse_ms']} ms",
+            "",
+        ])
+
+        # Bridges
         if r["pairs"]:
-            lines.append("--- Direct Wire Bridges ---")
-            lines.append("")
+            _insert_chunk(["--- Direct Wire Bridges ---", ""])
             for pin_a, pin_b in r["pairs"]:
                 short_a = pin_a.split("/")[-1] if "/" in pin_a else pin_a
                 short_b = pin_b.split("/")[-1] if "/" in pin_b else pin_b
-                lines.append(f"{short_a} | {short_b}")
-                lines.append("  True    |   True")
-                lines.append("  True    |   True")
-                lines.append("")
+                _insert_chunk([
+                    f"{short_a} | {short_b}",
+                    "  True    |   True",
+                    "  True    |   True",
+                    "",
+                ])
         else:
-            lines.append("--- Direct Wire Bridges: None ---")
-            lines.append("")
+            _insert_chunk(["--- Direct Wire Bridges: None ---", ""])
 
+        # Logic gates
         gates = r.get("gates", [])
         if gates:
-            lines.append("--- Logic Gates Detected ---")
-            lines.append("")
+            _insert_chunk(["--- Logic Gates Detected ---", ""])
             for gate in gates:
                 a_short = gate["input_a"].split("/")[-1] if "/" in gate["input_a"] else gate["input_a"]
                 b_short = gate["input_b"].split("/")[-1] if "/" in gate["input_b"] else gate["input_b"]
                 c_short = gate["output"].split("/")[-1] if "/" in gate["output"] else gate["output"]
                 gate_name = gate["gate_name"]
                 truth = gate["truth"]
-                lines.append(f"{a_short} {gate['gate_symbol']} {b_short} -> {c_short}  [{gate_name}]")
-                lines.append("  A   B   |   Out")
-                lines.append(f"  {truth[0]}  {truth[1]}   |   {truth[0]}")
-                lines.append(f"  {truth[2]}  {truth[3]}   |   {truth[1]}")
-                lines.append(f"  {truth[0]}  {truth[1]}   |   {truth[2]}")
-                lines.append(f"  {truth[2]}  {truth[3]}   |   {truth[3]}")
-                lines.append("")
+                _insert_chunk([
+                    f"{a_short} {gate['gate_symbol']} {b_short} -> {c_short}  [{gate_name}]",
+                    "  A   B   |   Out",
+                    f"  {truth[0]}  {truth[1]}   |   {truth[0]}",
+                    f"  {truth[2]}  {truth[3]}   |   {truth[1]}",
+                    f"  {truth[0]}  {truth[1]}   |   {truth[2]}",
+                    f"  {truth[2]}  {truth[3]}   |   {truth[3]}",
+                    "",
+                ])
         else:
-            lines.append("--- Logic Gates: None ---")
-            lines.append("")
+            _insert_chunk(["--- Logic Gates: None ---", ""])
 
+        # Combinational networks
         networks = r.get("networks", [])
         if networks:
-            lines.append("--- Combinational Networks (Gate Chains) ---")
-            lines.append("")
+            _insert_chunk(["--- Combinational Networks (Gate Chains) ---", ""])
             for net in networks:
-                lines.append(f"{net['upstream_name']} ({net['upstream_gate']}) "
-                             f"-> feeds into -> {net['downstream_name']} "
-                             f"({net['downstream_gate']})")
-                lines.append("")
+                _insert_chunk([
+                    f"{net['upstream_name']} ({net['upstream_gate']}) "
+                    f"-> feeds into -> {net['downstream_name']} "
+                    f"({net['downstream_gate']})",
+                    "",
+                ])
         else:
-            lines.append("--- Combinational Networks: None ---")
-            lines.append("")
+            _insert_chunk(["--- Combinational Networks: None ---", ""])
 
         if not r["pairs"] and not gates and not networks:
-            lines.append("No connections found.")
-            lines.append("")
-            lines.append(
+            _insert_chunk([
+                "No connections found.",
+                "",
                 "(No pins were found where driving one HIGH caused the "
-                "other to read HIGH.)")
+                "other to read HIGH.)",
+            ])
 
-        text_widget.insert("1.0", "\n".join(lines))
         text_widget.configure(state="disabled")
 
         btn_frame = ttk.Frame(win)
