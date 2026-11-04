@@ -189,6 +189,8 @@ class USB6363App:
         self._redraw_pending = False
         self._log_lines = []
         self._na_csv_saved = False
+        self._na_phase1_only = False
+        self._na_max_lines = None
 
         if not cli_mode:
             self.root.title("NI USB-6363 Monitor & Output Controller")
@@ -823,7 +825,7 @@ class USB6363App:
                 line = self.do_lines[i].split("/")[-1]
                 self._log(f"DO WRITE: {line} = {'HIGH' if v else 'LOW'}", "DEBUG")
 
-    def _test_pin_connections(self):
+    def _test_pin_connections(self, phase1_only=False, max_lines=None):
         """Analyze digital I/O pin connections and detect logic networks."""
         if not _HAS_NIDAQMX:
             if self.cli_mode:
@@ -858,6 +860,11 @@ class USB6363App:
         caps = get_device_capabilities(dev)
         dio_all = list(dict.fromkeys(caps.get("di_lines", []) + caps.get("do_lines", [])))
 
+        # Apply max_lines limit if specified
+        if max_lines is not None and max_lines > 0 and len(dio_all) > max_lines:
+            dio_all = dio_all[:max_lines]
+            self._log(f"Limited DIO lines to {max_lines} for analysis", "INFO")
+
         if len(dio_all) < 2:
             if self.cli_mode:
                 print("ERROR: Need at least 2 DIO lines to test")
@@ -887,6 +894,8 @@ class USB6363App:
             print(f"Network Analyzer starting on {dev}")
             print(f"Pulse width: {pulse_ms}ms")
             print(f"DIO lines: {len(dio_all)}")
+            if phase1_only:
+                print("Mode: Phase 1 only (single-pin bridge detection)")
             print()
 
         self._set_status("Network Analyzer running...", "orange")
@@ -907,15 +916,18 @@ class USB6363App:
         eta_times = []
 
         if self.cli_mode:
-            self._run_na_analysis(dev, dio_all, pulse_s, pulse_ms, was_running)
+            self._run_na_analysis(dev, dio_all, pulse_s, pulse_ms, was_running,
+                                  phase1_only=phase1_only)
         else:
             analysis_thread = threading.Thread(
                 target=self._run_na_analysis,
                 args=(dev, dio_all, pulse_s, pulse_ms, was_running),
+                kwargs={'phase1_only': phase1_only},
                 daemon=True)
             analysis_thread.start()
 
-    def _run_na_analysis(self, dev, dio_all, pulse_s, pulse_ms, was_running):
+    def _run_na_analysis(self, dev, dio_all, pulse_s, pulse_ms, was_running,
+                         phase1_only=False):
         """Run the Network Analyzer in a background thread."""
         total_tests = len(dio_all) + len(dio_all) * (len(dio_all) - 1) // 2 * 4
         test_count = 0
@@ -1068,6 +1080,60 @@ class USB6363App:
                     if b_responds_to_a and a_responds_to_b:
                         connected_pairs.append((pin_a, pin_b))
 
+            # Skip Phase 2 if Phase 1 only mode or no bridges found
+            # (no bidirectional connectivity = no logic gates possible)
+            if phase1_only:
+                if self.cli_mode:
+                    print("Phase 1 only mode — skipping Phase 2 logic gate detection.")
+                connected_pairs_for_phase2 = []
+                # Set results early since Phase 2 is skipped
+                self.na_results = {
+                    "device": dev,
+                    "pulse_ms": pulse_ms,
+                    "pairs": connected_pairs,
+                    "gates": [],
+                    "networks": [],
+                    "dio_all": dio_all,
+                }
+                if not self.cli_mode:
+                    self.root.after(0, lambda: self._finalize_na_gui(
+                        progress_win, dev, pulse_ms))
+                else:
+                    self._print_cli_na_results()
+                    self._save_cli_na_csv()
+                    self._set_status("DAQ: running", "green")
+                return
+            elif not connected_pairs:
+                if self.cli_mode:
+                    print("No bidirectional bridges found in Phase 1 — "
+                          "skipping Phase 2 logic gate detection "
+                          "(no connectivity = no logic gates possible).")
+                connected_pairs_for_phase2 = []
+                # Set results early since Phase 2 is skipped
+                self.na_results = {
+                    "device": dev,
+                    "pulse_ms": pulse_ms,
+                    "pairs": connected_pairs,
+                    "gates": [],
+                    "networks": [],
+                    "dio_all": dio_all,
+                }
+                if not self.cli_mode:
+                    self.root.after(0, lambda: self._finalize_na_gui(
+                        progress_win, dev, pulse_ms))
+                else:
+                    self._print_cli_na_results()
+                    self._save_cli_na_csv()
+                    self._set_status("DAQ: running", "green")
+                return
+            else:
+                connected_pairs_for_phase2 = connected_pairs
+
+            # Recalculate total_tests based on actual Phase 2 workload
+            phase2_tests = len(connected_pairs_for_phase2) * 4
+            total_tests = len(dio_all) + phase2_tests
+            test_count = len(dio_all)  # Phase 1 tests already completed
+
             # Phase 2: Full truth table on all pin pairs
             GATE_PATTERNS = {
                 (0, 0, 0, 0): ("CONST_0", "0"),
@@ -1091,91 +1157,86 @@ class USB6363App:
             logic_gates = []
             checked_pairs = set()
 
-            for i, in_a in enumerate(dio_all):
+            for in_a, in_b in connected_pairs_for_phase2:
                 if self._na_cancel:
                     self._log("Analysis cancelled by user during Phase 2", "WARN")
                     return
 
-                for in_b in dio_all[i + 1:]:
-                    if self._na_cancel:
-                        self._log("Analysis cancelled by user during Phase 2", "WARN")
-                        return
+                pair_key = tuple(sorted([in_a, in_b]))
+                if pair_key in checked_pairs:
+                    continue
+                checked_pairs.add(pair_key)
 
-                    pair_key = tuple(sorted([in_a, in_b]))
-                    if pair_key in checked_pairs:
+                test_count += 1
+                pct = int(test_count / total_tests * 100)
+
+                a_short = in_a.split("/")[-1] if "/" in in_a else in_a
+                b_short = in_b.split("/")[-1] if "/" in in_b else in_b
+                out_short = []
+                for l in dio_all:
+                    if l != in_a and l != in_b:
+                        out_short.append(l.split("/")[-1] if "/" in l else l)
+                    if len(out_short) >= 5:
+                        break
+                out_more = f" (+{len(dio_all)-2-5} more)" if len(dio_all) > 7 else ""
+                status_text = f"Outputting on DO {a_short}+{b_short} and reading DI {', '.join(out_short)}{out_more}{eta_str}"
+                update_progress(pct, status_text)
+
+                test_start = time.perf_counter()
+
+                output_lines = [l for l in dio_all if l != in_a and l != in_b]
+
+                with nidaqmx.Task() as do_task_2, nidaqmx.Task() as di_task_2:
+                    do_task_2.do_channels.add_do_chan(in_a)
+                    do_task_2.do_channels.add_do_chan(in_b)
+                    for line in output_lines:
+                        di_task_2.di_channels.add_di_chan(line)
+
+                    do_task_2.timeout = 2.0
+                    di_task_2.timeout = 2.0
+
+                    do_task_2.start()
+
+                    combos = [(False, False), (False, True),
+                              (True, False), (True, True)]
+                    results = {l: [False, False, False, False]
+                               for l in output_lines}
+
+                    for combo_idx, (a_val, b_val) in enumerate(combos):
+                        if self._na_cancel:
+                            return
+                        do_task_2.write([a_val, b_val])
+                        time.sleep(pulse_s)
+                        read_vals = np.atleast_1d(
+                            np.array(di_task_2.read())).ravel().astype(bool)
+                        do_task_2.write([False, False])
+                        time.sleep(pulse_s * 0.5)
+
+                        for j, out_line in enumerate(output_lines):
+                            if j < len(read_vals):
+                                results[out_line][combo_idx] = bool(read_vals[j])
+
+                for out_line, truth_list in results.items():
+                    truth = tuple(int(v) for v in truth_list)
+                    gate_name, gate_symbol = GATE_PATTERNS.get(
+                        truth, (f"CUSTOM{truth}", "?"))
+
+                    if truth == (0, 0, 0, 0):
                         continue
-                    checked_pairs.add(pair_key)
+                    if truth == (1, 1, 1, 1):
+                        continue
 
-                    test_count += 1
-                    pct = int(test_count / total_tests * 100)
+                    logic_gates.append({
+                        "input_a": in_a,
+                        "input_b": in_b,
+                        "output": out_line,
+                        "truth": truth,
+                        "gate_name": gate_name,
+                        "gate_symbol": gate_symbol,
+                    })
 
-                    a_short = in_a.split("/")[-1] if "/" in in_a else in_a
-                    b_short = in_b.split("/")[-1] if "/" in in_b else in_b
-                    out_short = []
-                    for l in dio_all:
-                        if l != in_a and l != in_b:
-                            out_short.append(l.split("/")[-1] if "/" in l else l)
-                        if len(out_short) >= 5:
-                            break
-                    out_more = f" (+{len(dio_all)-2-5} more)" if len(dio_all) > 7 else ""
-                    status_text = f"Outputting on DO {a_short}+{b_short} and reading DI {', '.join(out_short)}{out_more}{eta_str}"
-                    update_progress(pct, status_text)
-
-                    test_start = time.perf_counter()
-
-                    output_lines = [l for l in dio_all if l != in_a and l != in_b]
-
-                    with nidaqmx.Task() as do_task_2, nidaqmx.Task() as di_task_2:
-                        do_task_2.do_channels.add_do_chan(in_a)
-                        do_task_2.do_channels.add_do_chan(in_b)
-                        for line in output_lines:
-                            di_task_2.di_channels.add_di_chan(line)
-
-                        do_task_2.timeout = 2.0
-                        di_task_2.timeout = 2.0
-
-                        do_task_2.start()
-
-                        combos = [(False, False), (False, True),
-                                  (True, False), (True, True)]
-                        results = {l: [False, False, False, False]
-                                   for l in output_lines}
-
-                        for combo_idx, (a_val, b_val) in enumerate(combos):
-                            if self._na_cancel:
-                                return
-                            do_task_2.write([a_val, b_val])
-                            time.sleep(pulse_s)
-                            read_vals = np.atleast_1d(
-                                np.array(di_task_2.read())).ravel().astype(bool)
-                            do_task_2.write([False, False])
-                            time.sleep(pulse_s * 0.5)
-
-                            for j, out_line in enumerate(output_lines):
-                                if j < len(read_vals):
-                                    results[out_line][combo_idx] = bool(read_vals[j])
-
-                    for out_line, truth_list in results.items():
-                        truth = tuple(int(v) for v in truth_list)
-                        gate_name, gate_symbol = GATE_PATTERNS.get(
-                            truth, (f"CUSTOM{truth}", "?"))
-
-                        if truth == (0, 0, 0, 0):
-                            continue
-                        if truth == (1, 1, 1, 1):
-                            continue
-
-                        logic_gates.append({
-                            "input_a": in_a,
-                            "input_b": in_b,
-                            "output": out_line,
-                            "truth": truth,
-                            "gate_name": gate_name,
-                            "gate_symbol": gate_symbol,
-                        })
-
-                    test_time = time.perf_counter() - test_start
-                    eta_times.append(test_time)
+                test_time = time.perf_counter() - test_start
+                eta_times.append(test_time)
 
                 if self._na_cancel:
                     self._log("Analysis cancelled by user after Phase 2", "WARN")
@@ -1774,7 +1835,10 @@ def run_cli(args, app):
     if args.analyze:
         app.pulse_width_var = type('SV', (), {'get': lambda self: str(args.pulse_width)})()
         app.selected_device = type('SV', (), {'get': lambda self: dev})()
-        app._test_pin_connections()
+        app._na_phase1_only = args.phase_1_only
+        app._na_max_lines = args.max_lines
+        app._test_pin_connections(phase1_only=args.phase_1_only,
+                                  max_lines=args.max_lines)
         return 0
 
     # No action specified -- show help
@@ -1831,6 +1895,14 @@ def main():
     parser.add_argument(
         "--pulse-width", type=float, default=1.0,
         help="Pulse width in ms for Network Analyzer (default: 1.0)"
+    )
+    parser.add_argument(
+        "--phase-1-only", action="store_true",
+        help="Network Analyzer: run Phase 1 (single-pin bridge detection) only, skip Phase 2"
+    )
+    parser.add_argument(
+        "--max-lines", type=int, default=None,
+        help="Network Analyzer: limit number of DIO lines to test (default: all)"
     )
 
     args = parser.parse_args()

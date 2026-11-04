@@ -37,7 +37,8 @@ import tkinter as tk
 import ni_measurment as mod
 
 
-def run_full_network_analyzer(device_name="Dev1", pulse_ms=1.0, dio_lines=None):
+def run_full_network_analyzer(device_name="Dev1", pulse_ms=1.0, dio_lines=None,
+                               phase1_only=False, max_lines=None):
     """
     Run the full Network Analyzer end-to-end.
 
@@ -70,6 +71,11 @@ def run_full_network_analyzer(device_name="Dev1", pulse_ms=1.0, dio_lines=None):
         # Deduplicate while preserving order.
         dio_lines = list(dict.fromkeys(dio_lines))
 
+        # Apply max_lines limit if specified
+        if max_lines is not None and max_lines > 0 and len(dio_lines) > max_lines:
+            dio_lines = dio_lines[:max_lines]
+            print(f"Limited DIO lines to {max_lines} for analysis")
+
     app.selected_device = tk.StringVar(value=device_name)
     app.pulse_width_var = tk.StringVar(value=str(pulse_ms))
     app.di_lines = [l for l in dio_lines if "/port0/" in l]
@@ -100,7 +106,8 @@ def run_full_network_analyzer(device_name="Dev1", pulse_ms=1.0, dio_lines=None):
     print()
 
     # ---- Run the analysis ----
-    print("Starting Network Analyzer (Phase 1 -> Phase 2 -> Phase 3) ...")
+    mode_str = "Phase 1 only" if phase1_only else "Full (Phase 1 + Phase 2)"
+    print(f"Starting Network Analyzer ({mode_str}) ...")
     print()
 
     try:
@@ -110,6 +117,7 @@ def run_full_network_analyzer(device_name="Dev1", pulse_ms=1.0, dio_lines=None):
             pulse_ms / 1000.0,   # pulse_s
             pulse_ms,            # pulse_ms
             False,               # was_running
+            phase1_only=phase1_only,
         )
     except Exception as exc:  # noqa: BLE001
         errors.append(f"EXCEPTION: {type(exc).__name__}: {exc}")
@@ -273,12 +281,22 @@ def main():
         "--dio", type=str, nargs="*", default=None,
         help="Specific DIO lines to test (e.g. Dev1/port0/line0 Dev1/port1/line0)"
     )
+    parser.add_argument(
+        "--phase-1-only", action="store_true",
+        help="Run Phase 1 (single-pin bridge detection) only, skip Phase 2"
+    )
+    parser.add_argument(
+        "--max-lines", type=int, default=None,
+        help="Limit number of DIO lines to test (default: all)"
+    )
     args = parser.parse_args()
 
     results, errors, elapsed, csv_file = run_full_network_analyzer(
         device_name=args.device,
         pulse_ms=args.pulse_width,
         dio_lines=args.dio,
+        phase1_only=args.phase_1_only,
+        max_lines=args.max_lines,
     )
 
     # Exit code: 0 if no errors, 1 if errors occurred.
