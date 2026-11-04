@@ -1143,8 +1143,6 @@ class USB6363App:
 
                         for combo_idx, (a_val, b_val) in enumerate(combos):
                             if self._na_cancel:
-                                do_task_2.close()
-                                di_task_2.close()
                                 return
                             do_task_2.write([a_val, b_val])
                             time.sleep(pulse_s)
@@ -1176,8 +1174,6 @@ class USB6363App:
                             "gate_symbol": gate_symbol,
                         })
 
-                    do_task_2.close()
-                    di_task_2.close()
                     test_time = time.perf_counter() - test_start
                     eta_times.append(test_time)
 
