@@ -53,7 +53,7 @@ AI_MIN, AI_MAX = -10.0, 10.0
 AO_MIN, AO_MAX = -10.0, 10.0
 HISTORY_SECONDS = 10.0
 READ_PERIOD = 0.05
-UI_UPDATE_PERIOD = 50
+UI_UPDATE_PERIOD = 100  # ms — reduced from 50 to cut UI redraw overhead
 
 
 def discover_devices():
@@ -192,6 +192,8 @@ class USB6363App:
         self._na_phase1_only = False
         self._na_max_lines = None
         self._na_results_window = None
+        self._last_ai_len = 0
+        self._last_di_len = 0
 
         if not cli_mode:
             self.root.title("NI USB-6363 Monitor & Output Controller")
@@ -412,7 +414,7 @@ class USB6363App:
             row=0, column=0, sticky="w", padx=6, pady=6)
 
     def _build_plots(self, parent):
-        self.fig = Figure(figsize=(8, 5), constrained_layout=True)
+        self.fig = Figure(figsize=(8, 5))
         self.ax_ai = self.fig.add_subplot(2, 1, 1)
         self.ax_di = self.fig.add_subplot(2, 1, 2, sharex=self.ax_ai)
         colors = plt.cm.tab20.colors
@@ -520,7 +522,7 @@ class USB6363App:
             self.root.after(100, self._start_daq)
 
     def _rebuild_plots(self):
-        self.fig = Figure(figsize=(8, 5), constrained_layout=True)
+        self.fig = Figure(figsize=(8, 5))
         self.ax_ai = self.fig.add_subplot(2, 1, 1)
         self.ax_di = self.fig.add_subplot(2, 1, 2, sharex=self.ax_ai)
         colors = plt.cm.tab20.colors
@@ -588,6 +590,13 @@ class USB6363App:
             di_snapshot = list(self.di_buffer)
         if not ai_snapshot and not di_snapshot:
             return
+        # Skip redraw if no new data
+        ai_len = len(ai_snapshot)
+        di_len = len(di_snapshot)
+        if ai_len == self._last_ai_len and di_len == self._last_di_len:
+            return
+        self._last_ai_len = ai_len
+        self._last_di_len = di_len
         if ai_snapshot and self.ai_plot_lines:
             t_ai = np.array([row[0] for row in ai_snapshot])
             v_ai = np.array([row[1] for row in ai_snapshot])
@@ -625,6 +634,8 @@ class USB6363App:
         self.t0 = time.perf_counter()
         self.ai_buffer.clear()
         self.di_buffer.clear()
+        self._last_ai_len = 0
+        self._last_di_len = 0
         dev = self.selected_device.get()
         self.daq_thread = threading.Thread(
             target=self._daq_loop, args=(dev,), daemon=True)
