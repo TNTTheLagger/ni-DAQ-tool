@@ -842,6 +842,7 @@ class USB6363App:
         """Analyze digital I/O pin connections and detect logic networks."""
         self._na_finalized = False
         self._na_results_window = None
+        self._na_csv_saved = False
         if not _HAS_NIDAQMX:
             if self.cli_mode:
                 print("ERROR: nidaqmx is not installed")
@@ -1307,7 +1308,8 @@ class USB6363App:
         finally:
             if not self.cli_mode:
                 self.root.after(0, lambda: progress_win.destroy() if progress_win and progress_win.winfo_exists() else None)
-            if was_running:
+            if was_running and self.cli_mode:
+                # In CLI mode, resume DAQ immediately after analysis
                 self.root.after(100, self._start_daq)
                 self._log("DAQ acquisition resumed", "INFO")
 
@@ -1324,7 +1326,7 @@ class USB6363App:
             pass
 
         self._open_na_results_window()
-        self._set_status("DAQ: running", "green")
+        # Don't set status here - _on_na_results_window_close will resume DAQ
 
     def _print_cli_na_results(self):
         r = self.na_results
@@ -1451,9 +1453,10 @@ class USB6363App:
     def _on_na_results_window_close(self):
         """Handle results window close to clear the reference and resume DAQ."""
         self._na_results_window = None
-        # Resume DAQ acquisition if it was running before the analysis
+        # Resume DAQ acquisition if it was running before the analysis.
+        # Small delay lets NI-DAQmx fully release reserved lines.
         if self.running is False and self.selected_device.get():
-            self._start_daq()
+            self.root.after(200, self._start_daq)
 
     def _open_na_results_window(self):
         r = self.na_results
