@@ -1449,8 +1449,11 @@ class USB6363App:
             print(f"ERROR saving CSV: {e}")
 
     def _on_na_results_window_close(self):
-        """Handle results window close to clear the reference."""
+        """Handle results window close to clear the reference and resume DAQ."""
         self._na_results_window = None
+        # Resume DAQ acquisition if it was running before the analysis
+        if self.running is False and self.selected_device.get():
+            self._start_daq()
 
     def _open_na_results_window(self):
         r = self.na_results
