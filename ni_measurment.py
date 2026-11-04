@@ -191,6 +191,7 @@ class USB6363App:
         self._na_csv_saved = False
         self._na_phase1_only = False
         self._na_max_lines = None
+        self._na_results_window = None
 
         if not cli_mode:
             self.root.title("NI USB-6363 Monitor & Output Controller")
@@ -1445,13 +1446,28 @@ class USB6363App:
         except Exception as e:
             print(f"ERROR saving CSV: {e}")
 
+    def _on_na_results_window_close(self):
+        """Handle results window close to clear the reference."""
+        self._na_results_window = None
+
     def _open_na_results_window(self):
         r = self.na_results
 
+        # Close any existing results window to prevent duplicates
+        if self._na_results_window is not None:
+            try:
+                if self._na_results_window.winfo_exists():
+                    self._na_results_window.destroy()
+            except tk.TclError:
+                pass
+            self._na_results_window = None
+
         win = tk.Toplevel(self.root)
+        self._na_results_window = win
         win.title("Network Analyzer Results")
         win.geometry("1000x700")
         win.minsize(600, 400)
+        win.protocol("WM_DELETE_WINDOW", self._on_na_results_window_close)
 
         info_frame = ttk.Frame(win)
         info_frame.pack(fill="x", padx=10, pady=5)
