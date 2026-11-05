@@ -418,7 +418,8 @@ class USB6363App:
             row += 1
         pt_frame = ttk.LabelFrame(parent, text="Network Analyzer")
         pt_frame.grid(row=row, column=0, sticky="ew", pady=(0, 8))
-        pt_frame.grid_columnconfigure(1, weight=1)
+        pt_frame.grid_columnconfigure(0, weight=1)
+        pt_frame.grid_columnconfigure(1, weight=0)
         ttk.Label(pt_frame, text="Pulse width (ms):").grid(
             row=0, column=0, padx=4, pady=2, sticky="w")
         self.pulse_width_var = tk.StringVar(value="1.0")
@@ -437,7 +438,8 @@ class USB6363App:
         ttk.Checkbutton(pt_frame, text="Exhaustive mode (test ALL pin pairs "
                    "against all outputs — slow but catches 2-input gates "
                    "where neither input alone has effect)",
-                   variable=self.na_exhaustive_var).grid(
+                   variable=self.na_exhaustive_var,
+                   wraplength=300).grid(
             row=3, column=0, columnspan=2, padx=4, pady=2, sticky="w")
         ttk.Label(pt_frame, text="Pulse each DIO line HIGH, read all others as inputs.",
                   font=("TkDefaultFont", 8), foreground="gray").grid(
