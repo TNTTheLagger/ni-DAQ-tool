@@ -378,7 +378,7 @@ class USB6363App:
                 ao_min, ao_max = self.device_capabilities.get(
                     "ao_ranges", [(AO_MIN, AO_MAX)])[0]
                 val = tk.StringVar(value="0.000")
-                cb = ttk.Checkbutton(
+                cb = tk.Checkbutton(
                     ao_frame, variable=en,
                     command=lambda ch=i-1: self._ao_enable_toggle(ch))
                 cb.grid(row=i, column=0, padx=4, pady=2, sticky="w")
@@ -405,7 +405,7 @@ class USB6363App:
             for idx, line in enumerate(self.do_lines):
                 var = tk.BooleanVar(value=False)
                 short = line.split("/")[-1] if "/" in line else line
-                cb = ttk.Checkbutton(
+                cb = tk.Checkbutton(
                     do_frame, text=short, variable=var,
                     command=lambda i=idx: self._do_toggle(i))
                 r, c = divmod(idx, ncols)
@@ -430,14 +430,13 @@ class USB6363App:
                        exhaustive=self.na_exhaustive_var.get())).grid(
             row=1, column=0, columnspan=2, pady=4)
         self.na_and_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(pt_frame, text="Include Analog Output Monitoring "
+        tk.Checkbutton(pt_frame, text="Include Analog Output Monitoring "
                    "(tests analog outputs)",
-                   variable=self.na_and_var).grid(
+                   variable=self.na_and_var,
+                   wraplength=300).grid(
             row=2, column=0, columnspan=2, padx=4, pady=2, sticky="w")
         self.na_exhaustive_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(pt_frame, text="Exhaustive mode (test ALL pin pairs "
-                   "against all outputs — slow but catches 2-input gates "
-                   "where neither input alone has effect)",
+        tk.Checkbutton(pt_frame, text="Exhaustive mode (test all pin pairs)",
                    variable=self.na_exhaustive_var,
                    wraplength=300).grid(
             row=3, column=0, columnspan=2, padx=4, pady=2, sticky="w")
