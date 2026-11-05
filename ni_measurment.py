@@ -880,9 +880,10 @@ class USB6363App:
                 line = self.do_lines[i].split("/")[-1]
                 self._log(f"DO WRITE: {line} = {'HIGH' if v else 'LOW'}", "DEBUG")
 
-    def _test_pin_connections(self, phase1_only=False, max_lines=None):
+    def _test_pin_connections(self, phase1_only=False, max_lines=None,
+                              exhaustive=False):
         """Analyze digital I/O pin connections and detect logic networks."""
-        _log_module(f"USB6363App._test_pin_connections called (phase1_only={phase1_only}, max_lines={max_lines})")
+        _log_module(f"USB6363App._test_pin_connections called (phase1_only={phase1_only}, max_lines={max_lines}, exhaustive={exhaustive})")
         self._na_finalized = False
         self._na_results_window = None
         self._na_csv_saved = False
@@ -977,19 +978,21 @@ class USB6363App:
 
         if self.cli_mode:
             self._run_na_analysis(dev, dio_all, pulse_s, pulse_ms, was_running,
-                                  phase1_only=phase1_only)
+                                  phase1_only=phase1_only,
+                                  exhaustive=exhaustive)
         else:
             analysis_thread = threading.Thread(
                 target=self._run_na_analysis,
                 args=(dev, dio_all, pulse_s, pulse_ms, was_running),
-                kwargs={'phase1_only': phase1_only},
+                kwargs={'phase1_only': phase1_only,
+                        'exhaustive': exhaustive},
                 daemon=True)
             analysis_thread.start()
 
     def _run_na_analysis(self, dev, dio_all, pulse_s, pulse_ms, was_running,
-                         phase1_only=False):
+                         phase1_only=False, exhaustive=False):
         """Run the Network Analyzer in a background thread."""
-        _log_module(f"USB6363App._run_na_analysis called (dev={dev}, dio_all={dio_all}, pulse_ms={pulse_ms}, phase1_only={phase1_only})")
+        _log_module(f"USB6363App._run_na_analysis called (dev={dev}, dio_all={dio_all}, pulse_ms={pulse_ms}, phase1_only={phase1_only}, exhaustive={exhaustive})")
         total_tests = len(dio_all) + len(dio_all) * (len(dio_all) - 1) // 2 * 4
         test_count = 0
         eta_times = []
@@ -1219,47 +1222,31 @@ class USB6363App:
                     self._save_cli_na_csv()
                     self._set_status("DAQ: running", "green")
                 return
-            else:
-                # Build set of all lines that showed ANY Phase 1 activity
-                # (either as an output that responded, or as an input that
-                #  affected something)
-                active_lines = set()
-                for output_line, input_lines in affected_by.items():
-                    active_lines.add(output_line)
-                    active_lines.update(input_lines)
+            # Phase 2: Exhaustive truth table on ALL pin pairs against ALL outputs.
+            # This is the comprehensive mode — tests every possible input pair
+            # against every possible output to definitively rule out ambiguity.
+            # This catches:
+            #   - Direct wire bridges (A<->B)
+            #   - Logic gates where one input has standalone effect
+            #   - Logic gates where NEITHER input alone has effect
+            #     (e.g., pure A AND B -> C where A alone and B alone do nothing)
+            #   - Combinational networks with multiple chips
+            #
+            # This is ALWAYS exhaustive — no checkboxes, no guessing.
+            # The whole point of this tool is to discover connections without
+            # any prior knowledge.
+            phase2_candidates = []
+            for i, line_a in enumerate(dio_all):
+                for line_b in dio_all[i + 1:]:
+                    phase2_candidates.append((line_a, line_b, None))
 
-                # Build candidate pairs: any pair where at least one line
-                # showed Phase 1 activity
-                phase2_candidates = []
-                active_list = sorted(active_lines)
-                for i, line_a in enumerate(active_list):
-                    for line_b in active_list[i + 1:]:
-                        phase2_candidates.append((line_a, line_b, None))
-                        # output_line will be determined dynamically below
+            if self.cli_mode:
+                total_pairs = len(dio_all) * (len(dio_all) - 1) // 2
+                print(f"Phase 2: Exhaustive mode — testing ALL {total_pairs} pin pairs "
+                      f"against all {len(dio_all)} outputs")
+                print(f"  Total write/read cycles: {total_pairs * 4 * len(dio_all)}")
 
-                # Also test pairs where one line is active and the other
-                # is any other line (in case the inactive line is an input
-                # to a gate with no standalone effect)
-                inactive_lines = [l for l in dio_all if l not in active_lines]
-                for active_line in active_list:
-                    for inactive_line in inactive_lines:
-                        phase2_candidates.append((active_line, inactive_line, None))
-
-                # Deduplicate
-                seen = set()
-                unique_candidates = []
-                for a, b, _ in phase2_candidates:
-                    key = tuple(sorted([a, b]))
-                    if key not in seen:
-                        seen.add(key)
-                        unique_candidates.append((a, b, None))
-                phase2_candidates = unique_candidates
-
-                connected_pairs_for_phase2 = phase2_candidates
-
-                if self.cli_mode:
-                    print(f"Phase 2: Testing {len(phase2_candidates)} candidate pairs "
-                          f"(from {len(active_lines)} active lines out of {len(dio_all)} total)")
+            connected_pairs_for_phase2 = phase2_candidates
 
             # Phase 2: Full truth table on all pin pairs
             GATE_PATTERNS = {
@@ -2015,9 +2002,11 @@ def run_cli(args, app):
         app.selected_device = type('SV', (), {'get': lambda self: dev})()
         app._na_phase1_only = args.phase_1_only
         app._na_max_lines = args.max_lines
-        _log_module(f"run_cli: starting Network Analyzer on {dev} (phase1_only={args.phase_1_only}, max_lines={args.max_lines})")
+        app._na_exhaustive = args.exhaustive
+        _log_module(f"run_cli: starting Network Analyzer on {dev} (phase1_only={args.phase_1_only}, max_lines={args.max_lines}, exhaustive={args.exhaustive})")
         app._test_pin_connections(phase1_only=args.phase_1_only,
-                                  max_lines=args.max_lines)
+                                  max_lines=args.max_lines,
+                                  exhaustive=args.exhaustive)
         return 0
 
     # No action specified -- show help
@@ -2083,6 +2072,11 @@ def main():
     parser.add_argument(
         "--max-lines", type=int, default=None,
         help="Network Analyzer: limit number of DIO lines to test (default: all)"
+    )
+    parser.add_argument(
+        "--exhaustive", action="store_true",
+        help="Network Analyzer: test ALL pin pairs in Phase 2 (slow but catches "
+             "two-input gates where neither input alone has effect)"
     )
 
     args = parser.parse_args()
