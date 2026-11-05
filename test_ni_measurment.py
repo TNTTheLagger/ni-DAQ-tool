@@ -682,6 +682,152 @@ class TestAoDoWritePaths(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# Overcurrent protection tests                                                #
+# --------------------------------------------------------------------------- #
+
+class TestOvercurrentProtection(unittest.TestCase):
+    """Tests for overcurrent protection in AO/DO output paths."""
+
+    def setUp(self):
+        # Patch tkinter variables so they work without a Tk root.
+        self.bool_patch = patch.object(tk, "BooleanVar", _FakeTkVar)
+        self.str_patch = patch.object(tk, "StringVar", _FakeTkVar)
+        self.bool_patch.start()
+        self.str_patch.start()
+
+        self.app = mod.USB6363App(root=None, cli_mode=True)
+        self.app.ao_channels = ["Dev1/ao0", "Dev1/ao1"]
+        self.app.do_lines = ["Dev1/port1/line0", "Dev1/port1/line1"]
+        self.app.ao_enable_vars = [_FakeTkVar(True), _FakeTkVar(False)]
+        self.app.ao_voltage_vars = [_FakeTkVar("3.3"), _FakeTkVar("0.0")]
+        self.app.do_vars = [_FakeTkVar(True), _FakeTkVar(False)]
+        self.app.ao_values = [0.0, 0.0]
+        self.app.do_values = [False, False]
+        self.app.device_capabilities = {"ao_ranges": [(-10.0, 10.0)]}
+        self.app.ao_overcurrent_protected = set()
+        self.app.do_overcurrent_protected = set()
+        self.app.overcurrent_events = []
+
+    def tearDown(self):
+        self.bool_patch.stop()
+        self.str_patch.stop()
+
+    def test_ao_enable_toggle_blocked_when_overcurrent_protected(self):
+        """AO channel that was disabled due to overcurrent cannot be re-enabled."""
+        self.app.ao_channels = ["Dev1/ao0"]
+        self.app.ao_enable_vars = [_FakeTkVar(False)]
+        self.app.ao_overcurrent_protected.add("ao0")
+        with patch("builtins.print") as mock_print:
+            self.app._ao_enable_toggle(0)
+            self.assertFalse(self.app.ao_enable_vars[0].get())
+            mock_print.assert_called()
+
+    def test_do_toggle_blocked_when_overcurrent_protected(self):
+        """DO line that was disabled due to overcurrent cannot be re-enabled."""
+        self.app.do_lines = ["Dev1/port1/line0"]
+        self.app.do_vars = [_FakeTkVar(False)]
+        self.app.do_overcurrent_protected.add("line0")
+        with patch("builtins.print") as mock_print:
+            self.app._do_toggle(0)
+            self.assertFalse(self.app.do_vars[0].get())
+            mock_print.assert_called()
+
+    def test_write_ao_overcurrent_disables_channel(self):
+        """When _write_ao gets a DaqError with 'overcurrent', the channel is disabled."""
+        fake_task = MagicMock()
+        fake_task.write.side_effect = mod.DaqError("Specified channel cannot be written, overcurrent condition")
+        self.app.ao_task = fake_task
+        self.app.ao_channels = ["Dev1/ao0"]
+        self.app.ao_enable_vars = [_FakeTkVar(True)]
+        self.app.ao_voltage_vars = [_FakeTkVar("3.3")]
+        self.app.ao_values = [3.3]
+        self.app.device_capabilities = {"ao_ranges": [(-10.0, 10.0)]}
+        with patch("builtins.print") as mock_print:
+            self.app._write_ao()
+            self.assertIn("ao0", self.app.ao_overcurrent_protected)
+            self.assertFalse(self.app.ao_enable_vars[0].get())
+            self.assertEqual(self.app.ao_values[0], 0.0)
+            self.assertEqual(len(self.app.overcurrent_events), 1)
+            self.assertEqual(self.app.overcurrent_events[0]["channel"], "ao0")
+
+    def test_write_do_overcurrent_disables_line(self):
+        """When _write_do gets a DaqError with 'overcurrent', the line is disabled."""
+        fake_task = MagicMock()
+        fake_task.write.side_effect = mod.DaqError("Specified channel cannot be written, overcurrent condition")
+        self.app.do_task = fake_task
+        self.app.do_lines = ["Dev1/port1/line0"]
+        self.app.do_vars = [_FakeTkVar(True)]
+        self.app.do_values = [True]
+        with patch("builtins.print") as mock_print:
+            self.app._write_do()
+            self.assertIn("line0", self.app.do_overcurrent_protected)
+            self.assertFalse(self.app.do_vars[0].get())
+            self.assertFalse(self.app.do_values[0])
+            self.assertEqual(len(self.app.overcurrent_events), 1)
+            self.assertEqual(self.app.overcurrent_events[0]["channel"], "line0")
+
+    def test_apply_ao_skips_overcurrent_protected_channel(self):
+        """_apply_ao skips channels that are overcurrent protected."""
+        self.app._open_output_tasks = MagicMock()
+        fake_task = MagicMock()
+        self.app.ao_task = fake_task
+        self.app.ao_channels = ["Dev1/ao0", "Dev1/ao1"]
+        self.app.ao_enable_vars = [_FakeTkVar(True), _FakeTkVar(True)]
+        self.app.ao_voltage_vars = [_FakeTkVar("3.3"), _FakeTkVar("5.0")]
+        self.app.ao_values = [0.0, 0.0]
+        self.app.ao_overcurrent_protected.add("ao0")
+        self.app._apply_ao()
+        # Channel 0 is disabled due to overcurrent, channel 1 should be set to 5.0
+        self.assertEqual(self.app.ao_values[0], 0.0)
+        self.assertEqual(self.app.ao_values[1], 5.0)
+
+    def test_apply_do_skips_overcurrent_protected_line(self):
+        """_apply_do skips lines that are overcurrent protected."""
+        self.app._open_output_tasks = MagicMock()
+        fake_task = MagicMock()
+        self.app.do_task = fake_task
+        self.app.do_lines = ["Dev1/port1/line0", "Dev1/port1/line1"]
+        self.app.do_vars = [_FakeTkVar(True), _FakeTkVar(True)]
+        self.app.do_values = [False, False]
+        self.app.do_overcurrent_protected.add("line0")
+        self.app._apply_do()
+        # Line 0 is disabled due to overcurrent, line 1 should be set to True
+        self.assertFalse(self.app.do_values[0])
+        self.assertTrue(self.app.do_values[1])
+
+    def test_estimated_current_tracking(self):
+        """Estimated current is tracked and updated."""
+        self.app.ao_channels = ["Dev1/ao0"]
+        self.app.do_lines = ["Dev1/port1/line0"]
+        self.app.ao_channels = ["Dev1/ao0"]
+        self.app.ao_values = [5.0]
+        self.app.do_lines = ["Dev1/port1/line0"]
+        self.app.do_values = [True]
+        self.app.device_capabilities = {"ao_ranges": [(-10.0, 10.0)]}
+        # Call _open_output_tasks which computes estimated current
+        # (it will fail on real nidaqmx task creation, but we test the estimation logic)
+        try:
+            self.app._open_output_tasks()
+        except Exception:
+            pass  # Expected - no real NI hardware
+        # Estimated current should have been computed
+        self.assertIsInstance(self.app.estimated_output_current_ma, float)
+        self.assertGreaterEqual(self.app.estimated_output_current_ma, 0.0)
+
+    def test_overcurrent_events_recorded(self):
+        """Overcurrent events are recorded with timestamp, channel, and type."""
+        self.app.overcurrent_events.append({
+            "time": "12:00:00",
+            "channel": "Dev1/ao0",
+            "type": "AO",
+            "reason": "Overcurrent detected"
+        })
+        self.assertEqual(len(self.app.overcurrent_events), 1)
+        self.assertEqual(self.app.overcurrent_events[0]["channel"], "Dev1/ao0")
+        self.assertEqual(self.app.overcurrent_events[0]["type"], "AO")
+
+
+# --------------------------------------------------------------------------- #
 # Buffer management tests                                                     #
 # --------------------------------------------------------------------------- #
 

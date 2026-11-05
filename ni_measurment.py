@@ -55,6 +55,17 @@ HISTORY_SECONDS = 10.0
 READ_PERIOD = 0.05
 UI_UPDATE_PERIOD = 100  # ms — reduced from 50 to cut UI redraw overhead
 
+# --------------------------------------------------------------------------- #
+# Output current limits (USB-6363 specifications)
+# --------------------------------------------------------------------------- #
+# Analog outputs: ±10 V, max ~5 mA per channel (short-circuit protected)
+AO_MAX_CURRENT_MA = 5.0
+# Digital outputs: 3.3 V TTL, max ~8.5 mA source, ~12 mA sink per line
+DO_MAX_CURRENT_MA_SOURCE = 8.5
+DO_MAX_CURRENT_MA_SINK = 12.0
+# Total device current limit (approximate, shared across all outputs)
+TOTAL_OUTPUT_CURRENT_MA = 100.0
+
 
 def _log_module(message, level="DEBUG"):
     """Module-level logging helper (no self available)."""
@@ -214,6 +225,12 @@ class USB6363App:
         self._na_finalized = False
         self._last_ai_len = 0
         self._last_di_len = 0
+
+        # Overcurrent protection tracking
+        self.ao_overcurrent_protected = set()  # AO channels disabled due to overcurrent
+        self.do_overcurrent_protected = set()  # DO lines disabled due to overcurrent
+        self.overcurrent_events = []           # List of overcurrent events
+        self.estimated_output_current_ma = 0.0  # Estimated total output current
 
         if not cli_mode:
             self.root.title("NI USB-6363 Monitor & Output Controller")
@@ -751,7 +768,7 @@ class USB6363App:
             self.status_label.configure(foreground=color)
 
     def _open_output_tasks(self):
-        _log_module(f"USB6363App._open_output_tasks called (ao_task={self.ao_task}, do_task={self.ao_task})")
+        _log_module(f"USB6363App._open_output_tasks called (ao_task={self.ao_task}, do_task={self.do_task})")
         dev = self.selected_device.get().strip()
         if not dev:
             _log_module(f"USB6363App._open_output_tasks: no device selected")
@@ -759,21 +776,101 @@ class USB6363App:
         ao_ranges = self.device_capabilities.get(
             "ao_ranges", [(AO_MIN, AO_MAX)])[0]
         ao_min, ao_max = ao_ranges
+        
+        # Estimate current draw before opening tasks
+        estimated_ao_ma = 0.0
+        if self.ao_channels:
+            for chan in self.ao_channels:
+                if chan in self.ao_overcurrent_protected:
+                    continue
+                idx = self.ao_channels.index(chan)
+                v = abs(self.ao_values[idx]) if idx < len(self.ao_values) else 0.0
+                # Estimate current: V/R_load, assume minimum load of 2kΩ
+                estimated_ao_ma += (v / 2000.0) * 1000.0
+        
+        estimated_do_ma = 0.0
+        if self.do_lines:
+            for i, line in enumerate(self.do_lines):
+                if line in self.do_overcurrent_protected:
+                    continue
+                if i < len(self.do_values) and self.do_values[i]:
+                    estimated_do_ma += DO_MAX_CURRENT_MA_SOURCE
+        
+        estimated_total = estimated_ao_ma + estimated_do_ma
+        self.estimated_output_current_ma = estimated_total
+        
+        if estimated_total > TOTAL_OUTPUT_CURRENT_MA:
+            self._log(f"WARNING: Estimated output current {estimated_total:.1f} mA exceeds "
+                      f"device limit {TOTAL_OUTPUT_CURRENT_MA} mA", "WARN")
+            _log_module(f"USB6363App._open_output_tasks: estimated current {estimated_total:.1f} mA exceeds limit")
+
         if self.ao_task is None and self.ao_channels:
             self._log(f"Opening AO task with {len(self.ao_channels)} channels", "INFO")
             _log_module(f"USB6363App._open_output_tasks: creating AO task with channels {self.ao_channels}")
             self.ao_task = nidaqmx.Task()
             for chan in self.ao_channels:
-                self.ao_task.ao_channels.add_ao_voltage_chan(
-                    chan, min_val=ao_min, max_val=ao_max)
-            self.ao_task.write([0.0] * len(self.ao_channels))
+                if chan in self.ao_overcurrent_protected:
+                    self._log(f"Skipping AO channel {chan} - overcurrent protected", "WARN")
+                    continue
+                try:
+                    self.ao_task.ao_channels.add_ao_voltage_chan(
+                        chan, min_val=ao_min, max_val=ao_max)
+                except DaqError as e:
+                    if "overcurrent" in str(e).lower() or "current" in str(e).lower():
+                        self._log(f"AO channel {chan} overcurrent - disabling", "WARN")
+                        self.ao_overcurrent_protected.add(chan)
+                        self.ao_enable_vars[self.ao_channels.index(chan)].set(False)
+                        self.ao_values[self.ao_channels.index(chan)] = 0.0
+                        self.overcurrent_events.append({
+                            "time": time.strftime("%H:%M:%S"),
+                            "channel": chan,
+                            "type": "AO",
+                            "reason": str(e)
+                        })
+                    else:
+                        raise
+            try:
+                self.ao_task.write([0.0] * len(self.ao_channels))
+            except DaqError as e:
+                if "overcurrent" in str(e).lower() or "current" in str(e).lower():
+                    self._log(f"AO task write overcurrent - disabling task", "WARN")
+                    self.ao_task.close()
+                    self.ao_task = None
+                else:
+                    raise
         if self.do_task is None and self.do_lines:
             self._log(f"Opening DO task with {len(self.do_lines)} lines", "INFO")
             _log_module(f"USB6363App._open_output_tasks: creating DO task with lines {self.do_lines}")
             self.do_task = nidaqmx.Task()
             for line in self.do_lines:
-                self.do_task.do_channels.add_do_chan(line)
-            self.do_task.write([False] * len(self.do_lines))
+                if line in self.do_overcurrent_protected:
+                    self._log(f"Skipping DO line {line} - overcurrent protected", "WARN")
+                    continue
+                try:
+                    self.do_task.do_channels.add_do_chan(line)
+                except DaqError as e:
+                    if "overcurrent" in str(e).lower() or "current" in str(e).lower():
+                        self._log(f"DO line {line} overcurrent - disabling", "WARN")
+                        self.do_overcurrent_protected.add(line)
+                        self.do_vars[self.do_lines.index(line)].set(False)
+                        self.do_values[self.do_lines.index(line)] = False
+                        self.overcurrent_events.append({
+                            "time": time.strftime("%H:%M:%S"),
+                            "channel": line,
+                            "type": "DO",
+                            "reason": str(e)
+                        })
+                    else:
+                        raise
+            try:
+                self.do_task.write([False] * len(self.do_lines))
+            except DaqError as e:
+                if "overcurrent" in str(e).lower() or "current" in str(e).lower():
+                    self._log(f"DO task write overcurrent - disabling task", "WARN")
+                    self.do_task.close()
+                    self.do_task = None
+                else:
+                    raise
 
     def _close_output_tasks(self):
         _log_module(f"USB6363App._close_output_tasks called (ao_task={self.ao_task}, do_task={self.do_task})")
@@ -789,6 +886,15 @@ class USB6363App:
 
     def _ao_enable_toggle(self, ch):
         if not _HAS_NIDAQMX or ch >= len(self.ao_channels):
+            return
+        chan = self.ao_channels[ch].split("/")[-1]
+        if chan in self.ao_overcurrent_protected:
+            self._log(f"AO {ch} ({chan}) blocked - previously disabled due to overcurrent", "WARN")
+            if not self.cli_mode:
+                self._show_error("Output Protected",
+                                 f"AO channel {chan} has been automatically disabled due to overcurrent.\n"
+                                 f"Please check your wiring and reduce load before re-enabling.")
+            self.ao_enable_vars[ch].set(False)
             return
         self._open_output_tasks()
         if self.ao_enable_vars[ch].get():
@@ -839,6 +945,11 @@ class USB6363App:
         ao_min, ao_max = self.device_capabilities.get(
             "ao_ranges", [(AO_MIN, AO_MAX)])[0]
         for ch in range(len(self.ao_channels)):
+            chan = self.ao_channels[ch].split("/")[-1]
+            if chan in self.ao_overcurrent_protected:
+                self.ao_enable_vars[ch].set(False)
+                self.ao_values[ch] = 0.0
+                continue
             if self.ao_enable_vars[ch].get():
                 try:
                     v = float(self.ao_voltage_vars[ch].get())
@@ -851,13 +962,41 @@ class USB6363App:
 
     def _write_ao(self):
         if self.ao_task is not None:
-            self.ao_task.write(self.ao_values)
-            for ch, v in enumerate(self.ao_values):
-                chan = self.ao_channels[ch].split("/")[-1]
-                self._log(f"AO WRITE: {chan} = {v:+.4f} V (enabled={self.ao_enable_vars[ch].get()})", "DEBUG")
+            try:
+                self.ao_task.write(self.ao_values)
+                for ch, v in enumerate(self.ao_values):
+                    chan = self.ao_channels[ch].split("/")[-1]
+                    self._log(f"AO WRITE: {chan} = {v:+.4f} V (enabled={self.ao_enable_vars[ch].get()})", "DEBUG")
+            except DaqError as e:
+                if "overcurrent" in str(e).lower() or "current" in str(e).lower():
+                    self._log(f"AO write overcurrent - checking all channels", "WARN")
+                    for ch, v in enumerate(self.ao_values):
+                        chan = self.ao_channels[ch].split("/")[-1]
+                        if abs(v) > 0.1 and chan not in self.ao_overcurrent_protected:
+                            self.ao_overcurrent_protected.add(chan)
+                            self.ao_enable_vars[ch].set(False)
+                            self.ao_values[ch] = 0.0
+                            self._log(f"AO channel {chan} disabled due to overcurrent", "WARN")
+                            self.overcurrent_events.append({
+                                "time": time.strftime("%H:%M:%S"),
+                                "channel": chan,
+                                "type": "AO",
+                                "reason": str(e)
+                            })
+                else:
+                    raise
 
     def _do_toggle(self, i):
         if not _HAS_NIDAQMX or i >= len(self.do_lines):
+            return
+        line = self.do_lines[i].split("/")[-1]
+        if line in self.do_overcurrent_protected:
+            self._log(f"DO {i} ({line}) blocked - previously disabled due to overcurrent", "WARN")
+            if not self.cli_mode:
+                self._show_error("Output Protected",
+                                 f"DO line {line} has been automatically disabled due to overcurrent.\n"
+                                 f"Please check your wiring and reduce load before re-enabling.")
+            self.do_vars[i].set(False)
             return
         self._open_output_tasks()
         state = self.do_vars[i].get()
@@ -870,15 +1009,39 @@ class USB6363App:
             return
         self._open_output_tasks()
         for i in range(len(self.do_lines)):
+            line = self.do_lines[i].split("/")[-1]
+            if line in self.do_overcurrent_protected:
+                self.do_vars[i].set(False)
+                self.do_values[i] = False
+                continue
             self.do_values[i] = self.do_vars[i].get()
         self._write_do()
 
     def _write_do(self):
         if self.do_task is not None:
-            self.do_task.write(self.do_values)
-            for i, v in enumerate(self.do_values):
-                line = self.do_lines[i].split("/")[-1]
-                self._log(f"DO WRITE: {line} = {'HIGH' if v else 'LOW'}", "DEBUG")
+            try:
+                self.do_task.write(self.do_values)
+                for i, v in enumerate(self.do_values):
+                    line = self.do_lines[i].split("/")[-1]
+                    self._log(f"DO WRITE: {line} = {'HIGH' if v else 'LOW'}", "DEBUG")
+            except DaqError as e:
+                if "overcurrent" in str(e).lower() or "current" in str(e).lower():
+                    self._log(f"DO write overcurrent - checking all lines", "WARN")
+                    for i, v in enumerate(self.do_values):
+                        line = self.do_lines[i].split("/")[-1]
+                        if v and line not in self.do_overcurrent_protected:
+                            self.do_overcurrent_protected.add(line)
+                            self.do_vars[i].set(False)
+                            self.do_values[i] = False
+                            self._log(f"DO line {line} disabled due to overcurrent", "WARN")
+                            self.overcurrent_events.append({
+                                "time": time.strftime("%H:%M:%S"),
+                                "channel": line,
+                                "type": "DO",
+                                "reason": str(e)
+                            })
+                else:
+                    raise
 
     def _test_pin_connections(self, phase1_only=False, max_lines=None,
                               exhaustive=False):
