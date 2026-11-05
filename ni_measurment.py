@@ -435,7 +435,7 @@ class USB6363App:
                    variable=self.na_and_var).grid(
             row=2, column=0, columnspan=2, padx=4, pady=2, sticky="w")
         self.na_exhaustive_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(pt_frame, text="Exhaustive mode (test ALL pin pairs "
+        tk.Checkbutton(pt_frame, text="Exhaustive mode (test ALL pin pairs "
                    "against all outputs — slow but catches 2-input gates "
                    "where neither input alone has effect)",
                    variable=self.na_exhaustive_var,
