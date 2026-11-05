@@ -1222,29 +1222,100 @@ class USB6363App:
                     self._save_cli_na_csv()
                     self._set_status("DAQ: running", "green")
                 return
-            # Phase 2: Exhaustive truth table on ALL pin pairs against ALL outputs.
-            # This is the comprehensive mode — tests every possible input pair
-            # against every possible output to definitively rule out ambiguity.
+            # Phase 2: Exhaustive truth table on ALL pin pairs against ALL outputs,
+            # EXCLUDING any line that is part of a detected wire bridge.
+            #
+            # A bridged line's voltage is FORCED by its partner (they're shorted
+            # together), so it CANNOT be an independent input or output for gate
+            # detection. Testing it would create false positives:
+            #   - If line0 <-> line4 are bridged, testing line0+line1 -> line4 shows
+            #   "BUFFER_B" because line4 reads HIGH whenever line0 is HIGH --
+            #   but that's just the short, not a gate.
             # This catches:
-            #   - Direct wire bridges (A<->B)
+            #   - Direct wire bridges (A<->B) -- found in Phase 1
             #   - Logic gates where one input has standalone effect
             #   - Logic gates where NEITHER input alone has effect
             #     (e.g., pure A AND B -> C where A alone and B alone do nothing)
             #   - Combinational networks with multiple chips
             #
-            # This is ALWAYS exhaustive — no checkboxes, no guessing.
+            # This is ALWAYS exhaustive -- no checkboxes, no guessing.
             # The whole point of this tool is to discover connections without
             # any prior knowledge.
-            phase2_candidates = []
-            for i, line_a in enumerate(dio_all):
-                for line_b in dio_all[i + 1:]:
-                    phase2_candidates.append((line_a, line_b, None))
+            #   but that's just the short, not a gate.
+            # This catches:
+            #   - Direct wire bridges (A<->B) -- found in Phase 1
+            #   - Logic gates where one input has standalone effect
+            #   - Logic gates where NEITHER input alone has effect
+            #     (e.g., pure A AND B -> C where A alone and B alone do nothing)
+            #   - Combinational networks with multiple chips
+            #
+            # This is ALWAYS exhaustive (all non-bridged pairs) — no checkboxes,
+            # no guessing. The whole point of this tool is to discover connections
+            # without any prior knowledge.
+
+            # Build set of lines that are part of DIRECT WIRE BRIDGES.
+            # A bridged line's voltage is FORCED by its bridge partner,
+            # so it CANNOT be an independent input or output for gate
+            # detection.
+            bridged_lines = set()
+            for pin_a, pin_b in connected_pairs:
+                bridged_lines.add(pin_a)
+                bridged_lines.add(pin_b)
 
             if self.cli_mode:
-                total_pairs = len(dio_all) * (len(dio_all) - 1) // 2
-                print(f"Phase 2: Exhaustive mode — testing ALL {total_pairs} pin pairs "
-                      f"against all {len(dio_all)} outputs")
-                print(f"  Total write/read cycles: {total_pairs * 4 * len(dio_all)}")
+                print(f"Phase 2: Bridged lines excluded from gate testing: "
+                      f"{sorted(bridged_lines)}")
+
+            # Build set of lines that showed ANY Phase 1 activity
+            # (either as an output that responded, or as an input that
+            #  affected something)
+            active_lines = set()
+            for output_line, input_lines in affected_by.items():
+                active_lines.add(output_line)
+                active_lines.update(input_lines)
+
+                # Remove bridged lines from active set — they can't be
+                # independent gate inputs/outputs
+                active_lines -= bridged_lines
+
+                if self.cli_mode:
+                    for output_line, input_lines in affected_by.items():
+                        if output_line not in bridged_lines:
+                            print(f"  Phase 1: {output_line.split('/')[-1]} affected by: "
+                                  f"{sorted(input_lines - bridged_lines)}")
+
+            # Build candidate pairs: any pair where at least one line
+            # showed Phase 1 activity, NEITHER line is bridged
+            phase2_candidates = []
+            active_list = sorted(active_lines)
+            for i, line_a in enumerate(active_list):
+                for line_b in active_list[i + 1:]:
+                    phase2_candidates.append((line_a, line_b, None))
+
+                # Also test pairs where one line is active and the other
+                # is any non-bridged line (in case the inactive line is an
+                # input to a gate with no standalone effect)
+                inactive_lines = [l for l in dio_all
+                                  if l not in active_lines
+                                  and l not in bridged_lines]
+                for active_line in active_list:
+                    for inactive_line in inactive_lines:
+                        phase2_candidates.append((active_line, inactive_line, None))
+
+                # Deduplicate
+                seen = set()
+                unique_candidates = []
+                for a, b, _ in phase2_candidates:
+                    key = tuple(sorted([a, b]))
+                    if key not in seen:
+                        seen.add(key)
+                        unique_candidates.append((a, b, None))
+                phase2_candidates = unique_candidates
+
+                if self.cli_mode:
+                    print(f"Phase 2: Testing {len(phase2_candidates)} candidate pairs "
+                          f"(from {len(active_lines)} active non-bridged lines out of "
+                          f"{len(dio_all)} total, {len(bridged_lines)} bridged lines excluded)")
 
             connected_pairs_for_phase2 = phase2_candidates
 
