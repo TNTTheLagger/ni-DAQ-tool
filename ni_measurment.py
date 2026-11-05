@@ -53,12 +53,12 @@ AI_MIN, AI_MAX = -10.0, 10.0
 AO_MIN, AO_MAX = -10.0, 10.0
 HISTORY_SECONDS = 10.0
 READ_PERIOD = 0.05
-UI_UPDATE_PERIOD = 100  # ms — reduced from 50 to cut UI redraw overhead
+UI_UPDATE_PERIOD = 100  # ms â€” reduced from 50 to cut UI redraw overhead
 
 # --------------------------------------------------------------------------- #
 # Output current limits (USB-6363 specifications)
 # --------------------------------------------------------------------------- #
-# Analog outputs: ±10 V, max ~5 mA per channel (short-circuit protected)
+# Analog outputs: Â±10 V, max ~5 mA per channel (short-circuit protected)
 AO_MAX_CURRENT_MA = 5.0
 # Digital outputs: 3.3 V TTL, max ~8.5 mA source, ~12 mA sink per line
 DO_MAX_CURRENT_MA_SOURCE = 8.5
@@ -793,7 +793,7 @@ class USB6363App:
                     continue
                 idx = self.ao_channels.index(chan)
                 v = abs(self.ao_values[idx]) if idx < len(self.ao_values) else 0.0
-                # Estimate current: V/R_load, assume minimum load of 2kΩ
+                # Estimate current: V/R_load, assume minimum load of 2kÎ©
                 estimated_ao_ma += (v / 2000.0) * 1000.0
         
         estimated_do_ma = 0.0
@@ -1111,13 +1111,13 @@ class USB6363App:
                 f"This test will drive digital I/O lines HIGH for {pulse_ms}ms each\n"
                 f"while reading all other lines as inputs.\n\n"
                 f"Tests:\n"
-                f"• {len(dio_all)} single-pin tests\n"
-                f"• {len(dio_all) * (len(dio_all) - 1) // 2} pin pairs × 4 combinations each\n"
-                f"• Total: ~{len(dio_all) + len(dio_all) * (len(dio_all) - 1) // 2 * 4} write operations\n\n"
+                f"â€¢ {len(dio_all)} single-pin tests\n"
+                f"â€¢ {len(dio_all) * (len(dio_all) - 1) // 2} pin pairs Ã- 4 combinations each\n"
+                f"â€¢ Total: ~{len(dio_all) + len(dio_all) * (len(dio_all) - 1) // 2 * 4} write operations\n\n"
                 f"SAFETY:\n"
-                f"• Ensure no external voltage sources are connected to the pins\n"
-                f"• Pulse width is kept short ({pulse_ms}ms) to protect connected chips\n"
-                f"• Only one or two lines driven at a time\n\n"
+                f"â€¢ Ensure no external voltage sources are connected to the pins\n"
+                f"â€¢ Pulse width is kept short ({pulse_ms}ms) to protect connected chips\n"
+                f"â€¢ Only one or two lines driven at a time\n\n"
                 f"Continue?",
                 icon="warning")
             if not result:
@@ -1337,7 +1337,7 @@ class USB6363App:
             #   Test pairs where BOTH inputs affect the same output line
             if phase1_only:
                 if self.cli_mode:
-                    print("Phase 1 only mode — skipping Phase 2 logic gate detection.")
+                    print("Phase 1 only mode â€” skipping Phase 2 logic gate detection.")
                 connected_pairs_for_phase2 = []
                 # Set results and finalize (no Phase 2)
                 self.na_results = {
@@ -1374,7 +1374,7 @@ class USB6363App:
             #   Use --exhaustive to test all pairs in that case.
             if phase1_only:
                 if self.cli_mode:
-                    print("Phase 1 only mode — skipping Phase 2 logic gate detection.")
+                    print("Phase 1 only mode â€” skipping Phase 2 logic gate detection.")
                 connected_pairs_for_phase2 = []
                 # Set results and finalize (no Phase 2)
                 self.na_results = {
@@ -1420,73 +1420,33 @@ class USB6363App:
             #     (e.g., pure A AND B -> C where A alone and B alone do nothing)
             #   - Combinational networks with multiple chips
             #
-            # This is ALWAYS exhaustive (all non-bridged pairs) — no checkboxes,
+            # This is ALWAYS exhaustive (all non-bridged pairs) â€” no checkboxes,
             # no guessing. The whole point of this tool is to discover connections
             # without any prior knowledge.
 
-            # Build set of lines that are part of DIRECT WIRE BRIDGES.
-            # A bridged line's voltage is FORCED by its bridge partner,
-            # so it CANNOT be an independent input or output for gate
-            # detection.
+            # Build candidate pairs: ALL pin pairs against ALL outputs,
+            # excluding bridged lines whose voltage is forced by their
+            # partner (they can't be independent gate inputs/outputs).
+
+            # Build set of bridged lines
             bridged_lines = set()
             for pin_a, pin_b in connected_pairs:
                 bridged_lines.add(pin_a)
                 bridged_lines.add(pin_b)
 
-            if self.cli_mode:
-                print(f"Phase 2: Bridged lines excluded from gate testing: "
-                      f"{sorted(bridged_lines)}")
-
-            # Build set of lines that showed ANY Phase 1 activity
-            # (either as an output that responded, or as an input that
-            #  affected something)
-            active_lines = set()
-            for output_line, input_lines in affected_by.items():
-                active_lines.add(output_line)
-                active_lines.update(input_lines)
-
-                # Remove bridged lines from active set — they can't be
-                # independent gate inputs/outputs
-                active_lines -= bridged_lines
-
-                if self.cli_mode:
-                    for output_line, input_lines in affected_by.items():
-                        if output_line not in bridged_lines:
-                            print(f"  Phase 1: {output_line.split('/')[-1]} affected by: "
-                                  f"{sorted(input_lines - bridged_lines)}")
-
-            # Build candidate pairs: any pair where at least one line
-            # showed Phase 1 activity, NEITHER line is bridged
             phase2_candidates = []
-            active_list = sorted(active_lines)
-            for i, line_a in enumerate(active_list):
-                for line_b in active_list[i + 1:]:
+            for i, line_a in enumerate(dio_all):
+                if line_a in bridged_lines:
+                    continue
+                for line_b in dio_all[i + 1:]:
+                    if line_b in bridged_lines:
+                        continue
                     phase2_candidates.append((line_a, line_b, None))
 
-                # Also test pairs where one line is active and the other
-                # is any non-bridged line (in case the inactive line is an
-                # input to a gate with no standalone effect)
-                inactive_lines = [l for l in dio_all
-                                  if l not in active_lines
-                                  and l not in bridged_lines]
-                for active_line in active_list:
-                    for inactive_line in inactive_lines:
-                        phase2_candidates.append((active_line, inactive_line, None))
-
-                # Deduplicate
-                seen = set()
-                unique_candidates = []
-                for a, b, _ in phase2_candidates:
-                    key = tuple(sorted([a, b]))
-                    if key not in seen:
-                        seen.add(key)
-                        unique_candidates.append((a, b, None))
-                phase2_candidates = unique_candidates
-
-                if self.cli_mode:
-                    print(f"Phase 2: Testing {len(phase2_candidates)} candidate pairs "
-                          f"(from {len(active_lines)} active non-bridged lines out of "
-                          f"{len(dio_all)} total, {len(bridged_lines)} bridged lines excluded)")
+            if self.cli_mode:
+                print(f"Phase 2: Exhaustive mode - testing ALL {len(phase2_candidates)} pin pairs "
+                      f"against all {len(dio_all)} outputs")
+                print(f"  Total write/read cycles: {len(phase2_candidates) * 4 * len(dio_all)}")
 
             connected_pairs_for_phase2 = phase2_candidates
 
