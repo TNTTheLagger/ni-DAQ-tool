@@ -425,16 +425,23 @@ class USB6363App:
         self.pulse_entry = ttk.Entry(pt_frame, textvariable=self.pulse_width_var, width=8)
         self.pulse_entry.grid(row=0, column=1, padx=4, pady=2, sticky="w")
         ttk.Button(pt_frame, text="Run Network Analyzer",
-                   command=self._test_pin_connections).grid(
+                   command=lambda: self._test_pin_connections(
+                       exhaustive=self.na_exhaustive_var.get())).grid(
             row=1, column=0, columnspan=2, pady=4)
         self.na_and_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(pt_frame, text="Include Analog Output Monitoring "
                    "(tests analog outputs)",
                    variable=self.na_and_var).grid(
             row=2, column=0, columnspan=2, padx=4, pady=2, sticky="w")
+        self.na_exhaustive_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(pt_frame, text="Exhaustive mode (test ALL pin pairs "
+                   "against all outputs — slow but catches 2-input gates "
+                   "where neither input alone has effect)",
+                   variable=self.na_exhaustive_var).grid(
+            row=3, column=0, columnspan=2, padx=4, pady=2, sticky="w")
         ttk.Label(pt_frame, text="Pulse each DIO line HIGH, read all others as inputs.",
                   font=("TkDefaultFont", 8), foreground="gray").grid(
-            row=3, column=0, columnspan=2, padx=4, pady=(4, 0), sticky="w")
+            row=4, column=0, columnspan=2, padx=4, pady=(4, 0), sticky="w")
         row += 1
         info = ttk.LabelFrame(parent, text="Device Info")
         info.grid(row=row, column=0, sticky="ew")
