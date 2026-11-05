@@ -1270,6 +1270,7 @@ class USB6363App:
 
             logic_gates = []
             checked_pairs = set()
+            eta_times = []  # Reset for Phase 2 ETA calculation
 
             for in_a, in_b, out_line in connected_pairs_for_phase2:
                 if self._na_cancel:
@@ -1284,6 +1285,15 @@ class USB6363App:
                 test_count += 1
                 pct = int(test_count / total_tests * 100)
 
+                # Calculate ETA based on Phase 2 test times
+                if len(eta_times) > 0:
+                    avg_time = sum(eta_times) / len(eta_times)
+                    remaining = total_tests - test_count
+                    eta_seconds = avg_time * remaining
+                    eta_str = f" ETA: {self._format_eta(eta_seconds)}"
+                else:
+                    eta_str = ""
+
                 a_short = in_a.split("/")[-1] if "/" in in_a else in_a
                 b_short = in_b.split("/")[-1] if "/" in in_b else in_b
 
@@ -1297,7 +1307,7 @@ class USB6363App:
                     output_lines = [l for l in dio_all if l != in_a and l != in_b]
                     c_short = f"{len(output_lines)} lines"
 
-                status_text = f"Outputting on DO {a_short}+{b_short} and reading DI {c_short}"
+                status_text = f"Outputting on DO {a_short}+{b_short} and reading DI {c_short}{eta_str}"
                 update_progress(pct, status_text)
 
                 test_start = time.perf_counter()
