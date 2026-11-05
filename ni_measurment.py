@@ -1182,31 +1182,84 @@ class USB6363App:
                     self._save_cli_na_csv()
                     self._set_status("DAQ: running", "green")
                 return
+            # Phase 2: Full truth table on candidate pin pairs.
+            #
+            # Strategy: Only test pairs where at least ONE input showed
+            # Phase 1 activity (affected at least one output line). Pairs
+            # where NEITHER input did anything in Phase 1 are guaranteed
+            # to be false positives from crosstalk/noise.
+            #
+            # This catches:
+            #   - Direct wire bridges (A<->B) - already found in Phase 1
+            #   - Logic gates where one input has standalone effect (A->D, B->D, A AND B->C)
+            #   - Logic gates where both inputs have standalone effects
+            #
+            # This does NOT catch:
+            #   - Two-input gates where NEITHER input alone affects anything
+            #     (e.g., pure A AND B -> C where A alone and B alone do nothing)
+            #   Use --exhaustive to test all pairs in that case.
+            if phase1_only:
+                if self.cli_mode:
+                    print("Phase 1 only mode — skipping Phase 2 logic gate detection.")
+                connected_pairs_for_phase2 = []
+                # Set results and finalize (no Phase 2)
+                self.na_results = {
+                    "device": dev,
+                    "pulse_ms": pulse_ms,
+                    "pairs": connected_pairs,
+                    "gates": [],
+                    "networks": [],
+                    "dio_all": dio_all,
+                }
+                if not self.cli_mode:
+                    self.root.after(0, lambda: self._finalize_na_gui(
+                        progress_win, dev, pulse_ms))
+                else:
+                    self._print_cli_na_results()
+                    self._save_cli_na_csv()
+                    self._set_status("DAQ: running", "green")
+                return
             else:
-                # Build candidate (input_a, input_b, output) triples for Phase 2
-                # Only test pairs where both inputs affect the same output line
-                phase2_candidates = []
+                # Build set of all lines that showed ANY Phase 1 activity
+                # (either as an output that responded, or as an input that
+                #  affected something)
+                active_lines = set()
                 for output_line, input_lines in affected_by.items():
-                    input_list = list(input_lines)
-                    if len(input_list) >= 2:
-                        # All pairs of inputs that both affect this output
-                        for i in range(len(input_list)):
-                            for j in range(i + 1, len(input_list)):
-                                phase2_candidates.append(
-                                    (input_list[i], input_list[j], output_line)
-                                )
+                    active_lines.add(output_line)
+                    active_lines.update(input_lines)
 
-                # Also test bidirectional pairs as potential gates (rare but possible)
-                for pin_a, pin_b in connected_pairs:
-                    # A bidirectional pair could theoretically be a gate with feedback
-                    # but it's already marked as a direct bridge; skip for gate detection
-                    pass
+                # Build candidate pairs: any pair where at least one line
+                # showed Phase 1 activity
+                phase2_candidates = []
+                active_list = sorted(active_lines)
+                for i, line_a in enumerate(active_list):
+                    for line_b in active_list[i + 1:]:
+                        phase2_candidates.append((line_a, line_b, None))
+                        # output_line will be determined dynamically below
+
+                # Also test pairs where one line is active and the other
+                # is any other line (in case the inactive line is an input
+                # to a gate with no standalone effect)
+                inactive_lines = [l for l in dio_all if l not in active_lines]
+                for active_line in active_list:
+                    for inactive_line in inactive_lines:
+                        phase2_candidates.append((active_line, inactive_line, None))
+
+                # Deduplicate
+                seen = set()
+                unique_candidates = []
+                for a, b, _ in phase2_candidates:
+                    key = tuple(sorted([a, b]))
+                    if key not in seen:
+                        seen.add(key)
+                        unique_candidates.append((a, b, None))
+                phase2_candidates = unique_candidates
 
                 connected_pairs_for_phase2 = phase2_candidates
 
                 if self.cli_mode:
                     print(f"Phase 2: Testing {len(phase2_candidates)} candidate pairs "
-                          f"(from {len(affected_by)} output lines with inputs)")
+                          f"(from {len(active_lines)} active lines out of {len(dio_all)} total)")
 
             # Phase 2: Full truth table on all pin pairs
             GATE_PATTERNS = {
@@ -1231,15 +1284,6 @@ class USB6363App:
             logic_gates = []
             checked_pairs = set()
 
-            for in_a, in_b in connected_pairs_for_phase2:
-                if self._na_cancel:
-                    self._log("Analysis cancelled by user during Phase 2", "WARN")
-                    return
-
-                pair_key = tuple(sorted([in_a, in_b]))
-            logic_gates = []
-            checked_pairs = set()
-
             for in_a, in_b, out_line in connected_pairs_for_phase2:
                 if self._na_cancel:
                     self._log("Analysis cancelled by user during Phase 2", "WARN")
@@ -1255,7 +1299,17 @@ class USB6363App:
 
                 a_short = in_a.split("/")[-1] if "/" in in_a else in_a
                 b_short = in_b.split("/")[-1] if "/" in in_b else in_b
-                c_short = out_line.split("/")[-1] if "/" in out_line else out_line
+
+                # Determine output lines to test:
+                # - If out_line is specified (from Phase 1 affected_by mapping), test only that
+                # - If out_line is None, test all remaining lines as outputs
+                if out_line is not None:
+                    output_lines = [out_line]
+                    c_short = out_line.split("/")[-1] if "/" in out_line else out_line
+                else:
+                    output_lines = [l for l in dio_all if l != in_a and l != in_b]
+                    c_short = f"{len(output_lines)} lines"
+
                 status_text = f"Outputting on DO {a_short}+{b_short} and reading DI {c_short}"
                 update_progress(pct, status_text)
 
@@ -1265,7 +1319,8 @@ class USB6363App:
                 with nidaqmx.Task() as do_task_2, nidaqmx.Task() as di_task_2:
                     do_task_2.do_channels.add_do_chan(in_a)
                     do_task_2.do_channels.add_do_chan(in_b)
-                    di_task_2.di_channels.add_di_chan(out_line)
+                    for line in output_lines:
+                        di_task_2.di_channels.add_di_chan(line)
 
                     do_task_2.timeout = 2.0
                     di_task_2.timeout = 2.0
@@ -1274,7 +1329,9 @@ class USB6363App:
 
                     combos = [(False, False), (False, True),
                               (True, False), (True, True)]
-                    truth_results = [False, False, False, False]
+
+                    # Collect truth for each output line
+                    output_truths = {l: [False, False, False, False] for l in output_lines}
 
                     for combo_idx, (a_val, b_val) in enumerate(combos):
                         if self._na_cancel:
@@ -1286,27 +1343,31 @@ class USB6363App:
                         do_task_2.write([False, False])
                         time.sleep(pulse_s * 0.5)
 
-                        if len(read_vals) > 0:
-                            truth_results[combo_idx] = bool(read_vals[0])
+                        for j, out_line_actual in enumerate(output_lines):
+                            if j < len(read_vals):
+                                output_truths[out_line_actual][combo_idx] = bool(read_vals[j])
 
-                truth = tuple(int(v) for v in truth_results)
-                gate_name, gate_symbol = GATE_PATTERNS.get(
-                    truth, (f"CUSTOM{truth}", "?"))
+                # Evaluate each output line for gate patterns
+                for out_line_actual, truth_list in output_truths.items():
+                    truth = tuple(int(v) for v in truth_list)
+                    gate_name, gate_symbol = GATE_PATTERNS.get(
+                        truth, (f"CUSTOM{truth}", "?"))
 
-                if truth == (0, 0, 0, 0):
-                    continue
-                if truth == (1, 1, 1, 1):
-                    continue
+                    if truth == (0, 0, 0, 0):
+                        continue
+                    if truth == (1, 1, 1, 1):
+                        continue
 
-                logic_gates.append({
-                    "input_a": in_a,
-                    "input_b": in_b,
-                    "output": out_line,
-                    "truth": truth,
-                    "gate_name": gate_name,
-                    "gate_symbol": gate_symbol,
-                })
-                _log_module(f"USB6363App._run_na_analysis Phase 2 gate found: {a_short}+{b_short}->{c_short} [{gate_name}] truth={truth}")
+                    c_short_actual = out_line_actual.split("/")[-1] if "/" in out_line_actual else out_line_actual
+                    logic_gates.append({
+                        "input_a": in_a,
+                        "input_b": in_b,
+                        "output": out_line_actual,
+                        "truth": truth,
+                        "gate_name": gate_name,
+                        "gate_symbol": gate_symbol,
+                    })
+                    _log_module(f"USB6363App._run_na_analysis Phase 2 gate found: {a_short}+{b_short}->{c_short_actual} [{gate_name}] truth={truth}")
 
                 test_time = time.perf_counter() - test_start
                 eta_times.append(test_time)
